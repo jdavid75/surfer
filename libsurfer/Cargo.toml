@@ -97,6 +97,7 @@ ron.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 softposit.workspace = true
+surfer-gtkwave-parser = { path = "../surfer-gtkwave-parser" }
 surfer-translation-types = { path = "../surfer-translation-types", default-features = false }
 surfer-wcp = { path = "../surfer-wcp" }
 surver.workspace = true
