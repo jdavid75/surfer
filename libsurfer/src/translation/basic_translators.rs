@@ -3,7 +3,7 @@ use crate::wave_container::{ScopeId, VarId, VariableMeta};
 
 use eyre::Result;
 use itertools::Itertools;
-use num::{One, Zero};
+use num::{One, ToPrimitive, Zero};
 use surfer_translation_types::{
     BasicTranslator, NumericRange, VariableValue, check_vector_variable, extend_string,
     kind_for_binary_representation, parse_value_to_numeric,
@@ -497,10 +497,48 @@ impl BasicTranslator<VarId, ScopeId> for IdenticalMSBsTranslator {
     }
 }
 
+pub struct GrayCodeTranslator {}
+
+fn decode_gray(mut value: num::BigUint) -> num::BigUint {
+    let mut mask = value.clone();
+    while !mask.is_zero() {
+        mask >>= 1;
+        value ^= &mask;
+    }
+    value
+}
+
+impl BasicTranslator<VarId, ScopeId> for GrayCodeTranslator {
+    fn name(&self) -> String {
+        String::from("Gray code (RBC)")
+    }
+
+    fn basic_translate(&self, _num_bits: u32, value: &VariableValue) -> (String, ValueKind) {
+        let decoded = match value {
+            VariableValue::BigUint(v) => decode_gray(v.clone()),
+            VariableValue::String(s) => match check_vector_variable(s) {
+                Some(v) => return v,
+                None => match num::BigUint::parse_bytes(s.as_bytes(), 2) {
+                    Some(bi) => decode_gray(bi),
+                    None => return ("INVALID".to_string(), ValueKind::Warn),
+                },
+            },
+        };
+
+        (decoded.to_str_radix(10), ValueKind::Normal)
+    }
+
+    fn basic_translate_numeric(&self, _num_bits: u32, value: &VariableValue) -> Option<f64> {
+        Some(parse_value_to_numeric(value, |v| {
+            decode_gray(v.clone()).to_f64().unwrap_or(f64::NAN)
+        }))
+    }
+}
+
 #[cfg(test)]
 mod test {
 
-    use num::BigUint;
+    use num::{BigUint, FromPrimitive};
 
     use super::*;
 
@@ -1183,6 +1221,78 @@ mod test {
                 .basic_translate(5, &VariableValue::BigUint(BigUint::from(0b11111u32)))
                 .0,
             "5"
+        );
+    }
+
+    #[test]
+    fn gray_decoder() {
+        assert_eq!(
+            decode_gray(BigUint::from_u32(0b000).unwrap()),
+            BigUint::from_u32(0).unwrap()
+        );
+
+        assert_eq!(
+            decode_gray(BigUint::from_u32(0b001).unwrap()),
+            BigUint::from_u32(1).unwrap()
+        );
+
+        assert_eq!(
+            decode_gray(BigUint::from_u32(0b011).unwrap()),
+            BigUint::from_u32(2).unwrap()
+        );
+        assert_eq!(
+            decode_gray(BigUint::from_u32(0b010).unwrap()),
+            BigUint::from_u32(3).unwrap()
+        );
+        assert_eq!(
+            decode_gray(BigUint::from_u32(0b110).unwrap()),
+            BigUint::from_u32(4).unwrap()
+        );
+        assert_eq!(
+            decode_gray(BigUint::from_u32(0b111).unwrap()),
+            BigUint::from_u32(5).unwrap()
+        );
+        assert_eq!(
+            decode_gray(BigUint::from_u32(0b101).unwrap()),
+            BigUint::from_u32(6).unwrap()
+        );
+        assert_eq!(
+            decode_gray(BigUint::from_u32(0b100).unwrap()),
+            BigUint::from_u32(7).unwrap()
+        );
+    }
+
+    #[test]
+    fn gray_translator() {
+        assert_eq!(
+            GrayCodeTranslator {}
+                .basic_translate(5, &VariableValue::BigUint(BigUint::from(0b000u32)))
+                .0,
+            "0"
+        );
+
+        assert_eq!(
+            GrayCodeTranslator {}
+                .basic_translate(5, &VariableValue::BigUint(BigUint::from(0b010u32)))
+                .0,
+            "3"
+        );
+
+        assert_eq!(
+            GrayCodeTranslator {}
+                .basic_translate(5, &VariableValue::String("10".to_string()))
+                .0,
+            "3"
+        );
+
+        assert_eq!(
+            GrayCodeTranslator {}.basic_translate(5, &VariableValue::String("-10".to_string())),
+            ("DON'T CARE".to_string(), ValueKind::DontCare)
+        );
+
+        assert_eq!(
+            GrayCodeTranslator {}.basic_translate(5, &VariableValue::String("11h".to_string())),
+            ("WEAK".to_string(), ValueKind::Weak)
         );
     }
 }
