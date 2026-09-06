@@ -95,13 +95,26 @@ impl SystemState {
     ) where
         F: FnOnce(Utf8PathBuf) -> Vec<Message> + Send + 'static,
     {
+        self.file_dialog_open_async(title, filter, |path| async { messages(path) });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn file_dialog_open_async<F, Fut>(
+        &mut self,
+        title: &'static str,
+        filter: &'static FileFilter,
+        messages: F,
+    ) where
+        F: FnOnce(Utf8PathBuf) -> Fut + Send + 'static,
+        Fut: Future<Output = Vec<Message>> + Send + 'static,
+    {
         let sender = self.channels.msg_sender.clone();
 
         perform_async_work(async move {
             if let Some(file) = create_file_dialog(filter, title).pick_file().await {
                 let path = file.path().to_path_buf();
                 let result = match Utf8PathBuf::from_path_buf(path.clone()) {
-                    Ok(utf8_path) => messages(utf8_path),
+                    Ok(utf8_path) => messages(utf8_path).await,
                     Err(_) => vec![Message::Error(eyre::eyre!(
                         "File path '{}' contains invalid UTF-8",
                         path.display()
