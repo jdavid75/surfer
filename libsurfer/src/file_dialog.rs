@@ -69,6 +69,11 @@ pub(crate) static FST_EXPORT_FILTER: FileFilter = FileFilter {
     extensions: &["fst"],
 };
 
+pub(crate) static GTKWAVE_FILE_FILTER: FileFilter = FileFilter {
+    name: "GTKWave files (*.gtkw)",
+    extensions: &["gtkw"],
+};
+
 #[cfg(any(
     target_os = "macos",
     all(target_arch = "wasm32", not(feature = "vscode"))

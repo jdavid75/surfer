@@ -334,6 +334,7 @@ pub enum Message {
     LoadStateFromData(Vec<u8>),
     LoadStateFile(Option<Utf8PathBuf>),
     LoadState(Box<UserState>, Option<Utf8PathBuf>),
+    LoadGTKWaveDumpFile(Option<Utf8PathBuf>),
     SetStateFile(Utf8PathBuf),
     SetAboutVisible(bool),
     SetKeyHelpVisible(bool),

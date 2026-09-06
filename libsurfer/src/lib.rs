@@ -30,6 +30,7 @@ pub mod frame_buffer;
 pub mod fst_export;
 pub mod fzcmd;
 pub mod graphics;
+pub mod gtkwave;
 pub mod help;
 pub mod hierarchy;
 pub mod item_drawing_info;
@@ -1814,6 +1815,7 @@ impl SystemState {
             Message::LoadStateFromData(bytes) => self.load_state_from_bytes(&bytes),
             Message::LoadStateFile(path) => self.load_state_file(path),
             Message::LoadState(state, path) => self.load_state(state, path),
+            Message::LoadGTKWaveDumpFile(path) => self.load_gtk_wave_dump(path),
             Message::SetStateFile(path) => {
                 // since in wasm we can't support "save", only "save as" - never set the `state_file`
                 #[cfg(not(target_arch = "wasm32"))]

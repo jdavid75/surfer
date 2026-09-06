@@ -193,6 +193,9 @@ impl SystemState {
             )
             .add_closing_menu(msgs, ui);
 
+            b("Open GTKWave file...", Message::LoadGTKWaveDumpFile(None))
+                .add_closing_menu(msgs, ui);
+
             #[cfg(feature = "python")]
             {
                 b("Add Python translator", Message::OpenPythonPluginDialog)
