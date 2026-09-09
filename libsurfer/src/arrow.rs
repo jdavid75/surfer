@@ -84,13 +84,12 @@ fn arrow_geometry(from: Pos2, to: Pos2, width: f32) -> Option<(Pos2, Pos2, Pos2)
 
     Some((base, left, right))
 }
-/// Returns the vertical center of a displayed waveform item, in the same canvas-local
-/// (offset-free) space as `WaveData::drawing_infos`; convert via `ctx.to_screen` before use.
-fn item_center_y(waves: &WaveData, item_ref: &DisplayedItemRef) -> Option<f32> {
+/// Returns the vertical center of a displayed waveform item with the drawing offset applied.
+fn item_center_y(waves: &WaveData, item_ref: &DisplayedItemRef, offset: f32) -> Option<f32> {
     match waves.get_displayed_item_index(item_ref) {
         Some(vidx) => {
             let info = waves.drawing_infos.get(vidx.0)?;
-            Some(info.center())
+            Some(info.center() + offset)
         }
         None => None,
     }
@@ -200,7 +199,7 @@ impl Annotatable for ArrowAnnotation {
         ctx: &mut DrawingContext,
         theme: &SurferTheme,
         msgs: &mut Vec<Message>,
-        _y_offset: f32,
+        y_offset: f32,
         to_screen: RectTransform,
         time_formatter: &TimeFormatter,
     ) {
@@ -222,7 +221,7 @@ impl Annotatable for ArrowAnnotation {
         // `item_center_y` returns a canvas-local y-coordinate, so it must be converted
         // through `ctx.to_screen` before use as a final screen position.
         let to_y = match self.to.attached_item.as_ref() {
-            Some(item_ref) => match item_center_y(waves, item_ref) {
+            Some(item_ref) => match item_center_y(waves, item_ref, y_offset) {
                 Some(y) => y,
                 None => return,
             },
@@ -234,7 +233,7 @@ impl Annotatable for ArrowAnnotation {
         let from_y = match self.head_mode {
             ArrowHeadMode::End => to_y - self.length,
             ArrowHeadMode::Double => match self.from.attached_item.as_ref() {
-                Some(item_ref) => match item_center_y(waves, item_ref) {
+                Some(item_ref) => match item_center_y(waves, item_ref, y_offset) {
                     Some(y) => y,
                     None => return,
                 },
@@ -314,14 +313,14 @@ impl Annotatable for ArrowAnnotation {
         viewport: &Viewport,
         ctx: &DrawingContext,
         waves: &WaveData,
-        _offset: f32,
+        offset: f32,
     ) -> Option<Pos2> {
         let range = waves.time_range();
         let to_y = self
             .to
             .attached_item
             .as_ref()
-            .and_then(|item_ref| item_center_y(waves, item_ref))?;
+            .and_then(|item_ref| item_center_y(waves, item_ref, offset))?;
         let (x, y) = match self.head_mode {
             ArrowHeadMode::End => (
                 viewport.pixel_from_time(&self.to.time, ctx.cfg.canvas_size.x, range),
@@ -333,7 +332,7 @@ impl Annotatable for ArrowAnnotation {
                     .from
                     .attached_item
                     .as_ref()
-                    .and_then(|item_ref| item_center_y(waves, item_ref))?;
+                    .and_then(|item_ref| item_center_y(waves, item_ref, offset))?;
                 let from_x =
                     viewport.pixel_from_time(&self.from.time, ctx.cfg.canvas_size.x, range);
                 let to_x = viewport.pixel_from_time(&self.to.time, ctx.cfg.canvas_size.x, range);
