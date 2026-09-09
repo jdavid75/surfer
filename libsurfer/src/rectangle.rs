@@ -299,11 +299,11 @@ impl Annotatable for RectAnnotation {
         ctx: &DrawingContext,
         waves: &WaveData,
         offset: f32,
-    ) -> Pos2 {
+    ) -> Option<Pos2> {
         let range = waves.time_range();
         let x = viewport.pixel_from_time(&self.to.time, ctx.cfg.canvas_size.x, range);
-        let y = calculate_y(self.to.wave.as_ref(), waves).unwrap() + offset;
-        (ctx.to_screen)(x, y)
+        let y = calculate_y(self.to.wave.as_ref(), waves)? + offset;
+        Some((ctx.to_screen)(x, y))
     }
 
     fn get_time_info(&self, time_formatter: &TimeFormatter) -> String {
@@ -365,11 +365,11 @@ impl Widget for RectAnnotation {
             if on_border {
                 ui.interact(hitbox, self.annotation_data.id, Sense::click_and_drag())
             } else {
-                ui.allocate_response(egui::Vec2::ZERO, egui::Sense::empty())
+                ui.allocate_response(egui::Vec2::ZERO, Sense::empty())
             }
         } else {
             let rect = self.hide_annotation(ui, self.annotation_data.stroke, self.rect.min);
-            ui.interact(rect, self.annotation_data.id, egui::Sense::click_and_drag())
+            ui.interact(rect, self.annotation_data.id, Sense::click_and_drag())
         }
     }
 }

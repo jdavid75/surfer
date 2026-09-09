@@ -222,7 +222,7 @@ impl Annotatable for Annotation {
         ctx: &DrawingContext,
         waves: &WaveData,
         offset: f32,
-    ) -> Pos2 {
+    ) -> Option<Pos2> {
         match self {
             Annotation::Arrow(a) => a.get_comment_position(viewport, ctx, waves, offset),
             Annotation::Rect(r) => r.get_comment_position(viewport, ctx, waves, offset),
@@ -399,7 +399,7 @@ pub trait Annotatable {
         ctx: &DrawingContext,
         waves: &WaveData,
         offset: f32,
-    ) -> Pos2;
+    ) -> Option<Pos2>;
 
     fn draw_comment_box(
         &self,
@@ -489,11 +489,15 @@ impl WaveData {
             if self.selected_annotation == Some(annotation.get_id())
                 && viewport_idx == self.last_active_viewport_idx
             {
-                let mut menu_position = self.annotation_menu_pos.unwrap();
-                let menu_time = self.annotation_menu_time.clone().unwrap();
+                let Some(mut menu_position) = self.annotation_menu_pos else {
+                    return;
+                };
+                let Some(menu_time) = self.annotation_menu_time.as_ref() else {
+                    return;
+                };
 
                 menu_position.x =
-                    viewport.pixel_from_time(&menu_time, ctx.cfg.canvas_size.x, self.time_range());
+                    viewport.pixel_from_time(menu_time, ctx.cfg.canvas_size.x, self.time_range());
                 let temp_y = menu_position.y;
                 menu_position = (ctx.to_screen)(menu_position.x, menu_position.y);
                 menu_position.y = temp_y;
@@ -502,9 +506,11 @@ impl WaveData {
             }
         }
         for annotation in &self.annotations {
-            if annotation.show_comment_box() && annotation.is_visible() {
-                let comment_position =
-                    annotation.get_comment_position(viewport, ctx, self, y_offset);
+            if annotation.show_comment_box()
+                && annotation.is_visible()
+                && let Some(comment_position) =
+                    annotation.get_comment_position(viewport, ctx, self, y_offset)
+            {
                 let (id, comment) =
                     annotation.draw_comment_box(ui, viewport_idx, msgs, comment_position);
                 // Only update comment if change has been made or something is being written
