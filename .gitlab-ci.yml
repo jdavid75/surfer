@@ -584,11 +584,9 @@ vscode-publish:
   needs: [vscode-prepare-publish]
   dependencies: [vscode-prepare-publish]
   stage: upload
+  image: node:22-slim
   script:
-    - apt update
-    - apt install -y npm
-    - npm install -g @vscode/vsce
-    - npm install -g ovsx
+    - npm install -g @vscode/vsce ovsx
     - npx ovsx publish surfer-vscode/extension/extension.vsix -p ${VSIX_PAT}
     - vsce publish -i surfer-vscode/extension/extension.vsix
   only:
