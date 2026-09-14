@@ -18,7 +18,8 @@ use crate::{
     async_util::AsyncJob,
     clock_highlighting::ClockHighlightType,
     config::{FocusHighlight, SurferConfig, TransitionValue},
-    displayed_item::{DisplayedFieldRef, DisplayedItemRef},
+    decoders::{DecoderInput, DecoderSettings, SettingValue, ValueFormat},
+    displayed_item::{AnalogRenderStyle, AnalogSettings, DisplayedFieldRef, DisplayedItemRef},
     displayed_item_tree::VisibleItemIndex,
     graphics::{Direction, GrPoint, Graphic, GraphicId, GraphicsY},
     hierarchy::{HierarchyStyle, ParameterDisplayLocation, ScopeExpandType},
@@ -38,6 +39,25 @@ use crate::{
 const SNAPSHOT_WIDTH: f32 = 1280.0;
 const SNAPSHOT_HEIGHT: f32 = 720.0;
 const SNAPSHOT_SIZE: Vec2 = Vec2::new(SNAPSHOT_WIDTH, SNAPSHOT_HEIGHT);
+/// Default settings for the bundled TDM decoder with overrides.
+fn tdm_settings(values: &[(&str, SettingValue)]) -> DecoderSettings {
+    let decoder = crate::decoders::decoder_by_id("tdm_audio").expect("bundled tdm_audio decoder");
+    let mut settings = decoder.default_settings();
+    for (key, value) in values {
+        settings.set((*key).to_string(), value.clone());
+    }
+    settings
+}
+
+/// Default settings for the bundled S/PDIF decoder with overrides.
+fn spdif_settings(values: &[(&str, SettingValue)]) -> DecoderSettings {
+    let decoder = crate::decoders::decoder_by_id("spdif").expect("bundled spdif decoder");
+    let mut settings = decoder.default_settings();
+    for (key, value) in values {
+        settings.set((*key).to_string(), value.clone());
+    }
+    settings
+}
 
 fn print_image(img: &DynamicImage) {
     if std::io::stdout().is_terminal() {
@@ -168,14 +188,21 @@ pub(crate) fn render_and_compare_inner(
             ctx.set_visuals(state.get_visuals());
             setup_custom_font(ctx);
             let msgs = state.draw(ctx, Some(size));
-            // Process only BuildAnalogCache messages as other messages can be fuzzy (command matcher)
+            // Process only cache-build messages as other messages can be fuzzy (command matcher)
             for msg in msgs {
-                if matches!(msg, Message::BuildAnalogCache { .. }) {
+                if matches!(
+                    msg,
+                    Message::BuildAnalogCache { .. } | Message::BuildDecoderCache { .. }
+                ) {
                     state.update(msg);
                 }
             }
-            // Wait for analog cache builds to complete
-            while !state.analog_caches_ready() {
+            // Wait for cache builds to complete
+            let cache_start = std::time::Instant::now();
+            while !state.analog_caches_ready() || !state.decoder_caches_ready() {
+                if cache_start.elapsed().as_secs() > 10 {
+                    panic!("Timeout waiting for caches to build");
+                }
                 std::thread::sleep(std::time::Duration::from_millis(1));
                 state.handle_async_messages();
             }
@@ -3872,8 +3899,8 @@ fn theme_menu_radio_button() {
 
     // Frames 3-6: hover over "Theme" to open the submenu (no click, so the
     // View dropdown stays open).  "Theme" is near the bottom of the View
-    // dropdown at approximately y=365.
-    let theme_pos = Pos2::new(50.0, 365.0);
+    // dropdown at approximately y=376.
+    let theme_pos = Pos2::new(50.0, 376.0);
     for _ in 0..4 {
         backend.run(
             RawInput {
@@ -3904,3 +3931,558 @@ fn theme_menu_radio_button() {
 
     compare_with_snapshot(&Utf8PathBuf::from("theme_menu_radio_button"), &new);
 }
+
+snapshot_ui_with_file_and_msgs!(
+    tdm_audio_decoder,
+    "examples/tdm_audio.vcd",
+    [
+        Message::AddVariables(vec![
+            VariableRef::from_hierarchy_string("tb.bitclk"),
+            VariableRef::from_hierarchy_string("tb.frame_sync"),
+            VariableRef::from_hierarchy_string("tb.data"),
+        ]),
+        Message::AddDecoder {
+            decoder: "tdm_audio".to_string(),
+            inputs: vec![
+                DecoderInput {
+                    role: "bitclk".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.bitclk"),
+                },
+                DecoderInput {
+                    role: "frame_sync".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.frame_sync"),
+                },
+                DecoderInput {
+                    role: "data".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.data"),
+                },
+            ],
+            settings: tdm_settings(&[]),
+            show_samples: true,
+            value_format: ValueFormat::Decimal,
+            analog: None,
+        },
+    ]
+);
+
+snapshot_ui_with_file_and_msgs!(
+    tdm_audio_decoder_zoomed,
+    "examples/tdm_audio.vcd",
+    [
+        Message::AddVariables(vec![
+            VariableRef::from_hierarchy_string("tb.bitclk"),
+            VariableRef::from_hierarchy_string("tb.frame_sync"),
+            VariableRef::from_hierarchy_string("tb.data"),
+        ]),
+        Message::AddDecoder {
+            decoder: "tdm_audio".to_string(),
+            inputs: vec![
+                DecoderInput {
+                    role: "bitclk".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.bitclk"),
+                },
+                DecoderInput {
+                    role: "frame_sync".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.frame_sync"),
+                },
+                DecoderInput {
+                    role: "data".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.data"),
+                },
+            ],
+            settings: tdm_settings(&[]),
+            show_samples: true,
+            value_format: ValueFormat::Decimal,
+            analog: None,
+        },
+        Message::ZoomToRange {
+            start: BigInt::from(2),
+            end: BigInt::from(6),
+            viewport_idx: 0,
+        },
+    ]
+);
+
+snapshot_ui_with_file_and_msgs!(
+    tdm_audio_decoder_right_justified,
+    "examples/tdm_audio_right_8ch_24bit.vcd",
+    [
+        Message::AddVariables(vec![
+            VariableRef::from_hierarchy_string("tb.bitclk"),
+            VariableRef::from_hierarchy_string("tb.frame_sync"),
+            VariableRef::from_hierarchy_string("tb.data"),
+        ]),
+        Message::AddDecoder {
+            decoder: "tdm_audio".to_string(),
+            inputs: vec![
+                DecoderInput {
+                    role: "bitclk".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.bitclk"),
+                },
+                DecoderInput {
+                    role: "frame_sync".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.frame_sync"),
+                },
+                DecoderInput {
+                    role: "data".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.data"),
+                },
+            ],
+            settings: tdm_settings(&[
+                ("bits", SettingValue::Integer(24)),
+                ("channels", SettingValue::Integer(8)),
+                ("slot_width", SettingValue::Integer(32)),
+                ("justification", SettingValue::Enum("right".to_string()))
+            ]),
+            show_samples: true,
+            value_format: ValueFormat::Decimal,
+            analog: None,
+        },
+    ]
+);
+
+snapshot_ui_with_file_and_msgs!(
+    tdm_audio_decoder_i2s,
+    "examples/i2s_audio_2ch_24bit.vcd",
+    [
+        Message::AddVariables(vec![
+            VariableRef::from_hierarchy_string("tb.bitclk"),
+            VariableRef::from_hierarchy_string("tb.frame_sync"),
+            VariableRef::from_hierarchy_string("tb.data"),
+        ]),
+        Message::AddDecoder {
+            decoder: "tdm_audio".to_string(),
+            inputs: vec![
+                DecoderInput {
+                    role: "bitclk".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.bitclk"),
+                },
+                DecoderInput {
+                    role: "frame_sync".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.frame_sync"),
+                },
+                DecoderInput {
+                    role: "data".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.data"),
+                },
+            ],
+            settings: tdm_settings(&[
+                ("mode", SettingValue::Enum("level".to_string())),
+                ("active_high", SettingValue::Bool(false)),
+                ("bits", SettingValue::Integer(24)),
+                ("channels", SettingValue::Integer(2)),
+                ("slot_width", SettingValue::Integer(32)),
+                ("offset", SettingValue::Integer(1))
+            ]),
+            show_samples: true,
+            value_format: ValueFormat::Decimal,
+            analog: None,
+        },
+    ]
+);
+
+snapshot_ui_with_file_and_msgs!(
+    tdm_audio_decoder_left_justified,
+    "examples/tdm_audio_left_8ch_24bit.vcd",
+    [
+        Message::AddVariables(vec![
+            VariableRef::from_hierarchy_string("tb.bitclk"),
+            VariableRef::from_hierarchy_string("tb.frame_sync"),
+            VariableRef::from_hierarchy_string("tb.data"),
+        ]),
+        Message::AddDecoder {
+            decoder: "tdm_audio".to_string(),
+            inputs: vec![
+                DecoderInput {
+                    role: "bitclk".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.bitclk"),
+                },
+                DecoderInput {
+                    role: "frame_sync".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.frame_sync"),
+                },
+                DecoderInput {
+                    role: "data".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.data"),
+                },
+            ],
+            settings: tdm_settings(&[
+                ("bits", SettingValue::Integer(24)),
+                ("channels", SettingValue::Integer(8)),
+                ("slot_width", SettingValue::Integer(32)),
+                ("justification", SettingValue::Enum("left".to_string()))
+            ]),
+            show_samples: true,
+            value_format: ValueFormat::Decimal,
+            analog: None,
+        },
+    ]
+);
+
+snapshot_ui_with_file_and_msgs!(
+    tdm_audio_decoder_falling_edges,
+    "examples/tdm_audio_left_8ch_24bit_falling_both.vcd",
+    [
+        Message::AddVariables(vec![
+            VariableRef::from_hierarchy_string("tb.bitclk"),
+            VariableRef::from_hierarchy_string("tb.frame_sync"),
+            VariableRef::from_hierarchy_string("tb.data"),
+        ]),
+        Message::AddDecoder {
+            decoder: "tdm_audio".to_string(),
+            inputs: vec![
+                DecoderInput {
+                    role: "bitclk".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.bitclk"),
+                },
+                DecoderInput {
+                    role: "frame_sync".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.frame_sync"),
+                },
+                DecoderInput {
+                    role: "data".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.data"),
+                },
+            ],
+            settings: tdm_settings(&[
+                ("edge", SettingValue::Enum("falling".to_string())),
+                ("fs_edge", SettingValue::Enum("falling".to_string())),
+                ("bits", SettingValue::Integer(24)),
+                ("channels", SettingValue::Integer(8)),
+                ("slot_width", SettingValue::Integer(32))
+            ]),
+            show_samples: true,
+            value_format: ValueFormat::Decimal,
+            analog: None,
+        },
+    ]
+);
+
+snapshot_ui_with_file_and_msgs!(
+    tdm_audio_decoder_analog,
+    "examples/tdm_audio_left_8ch_24bit.vcd",
+    [
+        Message::AddVariables(vec![
+            VariableRef::from_hierarchy_string("tb.bitclk"),
+            VariableRef::from_hierarchy_string("tb.frame_sync"),
+            VariableRef::from_hierarchy_string("tb.data"),
+        ]),
+        Message::AddDecoder {
+            decoder: "tdm_audio".to_string(),
+            inputs: vec![
+                DecoderInput {
+                    role: "bitclk".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.bitclk"),
+                },
+                DecoderInput {
+                    role: "frame_sync".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.frame_sync"),
+                },
+                DecoderInput {
+                    role: "data".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.data"),
+                },
+            ],
+            settings: tdm_settings(&[
+                ("bits", SettingValue::Integer(24)),
+                ("channels", SettingValue::Integer(8)),
+                ("slot_width", SettingValue::Integer(32))
+            ]),
+            show_samples: false,
+            value_format: ValueFormat::Decimal,
+            analog: Some(AnalogSettings {
+                render_style: AnalogRenderStyle::Step,
+                ..Default::default()
+            }),
+        },
+    ]
+);
+
+snapshot_ui_with_file_and_msgs!(
+    tdm_audio_decoder_analog_interpolated,
+    "examples/tdm_audio_left_8ch_24bit.vcd",
+    [
+        Message::AddVariables(vec![
+            VariableRef::from_hierarchy_string("tb.bitclk"),
+            VariableRef::from_hierarchy_string("tb.frame_sync"),
+            VariableRef::from_hierarchy_string("tb.data"),
+        ]),
+        Message::AddDecoder {
+            decoder: "tdm_audio".to_string(),
+            inputs: vec![
+                DecoderInput {
+                    role: "bitclk".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.bitclk"),
+                },
+                DecoderInput {
+                    role: "frame_sync".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.frame_sync"),
+                },
+                DecoderInput {
+                    role: "data".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.data"),
+                },
+            ],
+            settings: tdm_settings(&[
+                ("bits", SettingValue::Integer(24)),
+                ("channels", SettingValue::Integer(8)),
+                ("slot_width", SettingValue::Integer(32))
+            ]),
+            show_samples: false,
+            value_format: ValueFormat::Decimal,
+            analog: Some(AnalogSettings {
+                render_style: AnalogRenderStyle::Interpolated,
+                ..Default::default()
+            }),
+        },
+    ]
+);
+
+snapshot_ui_with_file_and_msgs!(
+    tdm_audio_decoder_analog_with_samples,
+    "examples/tdm_audio_left_8ch_24bit.vcd",
+    [
+        Message::AddVariables(vec![
+            VariableRef::from_hierarchy_string("tb.bitclk"),
+            VariableRef::from_hierarchy_string("tb.frame_sync"),
+            VariableRef::from_hierarchy_string("tb.data"),
+        ]),
+        Message::AddDecoder {
+            decoder: "tdm_audio".to_string(),
+            inputs: vec![
+                DecoderInput {
+                    role: "bitclk".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.bitclk"),
+                },
+                DecoderInput {
+                    role: "frame_sync".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.frame_sync"),
+                },
+                DecoderInput {
+                    role: "data".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.data"),
+                },
+            ],
+            settings: tdm_settings(&[
+                ("bits", SettingValue::Integer(24)),
+                ("channels", SettingValue::Integer(8)),
+                ("slot_width", SettingValue::Integer(32))
+            ]),
+            show_samples: true,
+            value_format: ValueFormat::Decimal,
+            analog: Some(AnalogSettings::decoder_default()),
+        },
+    ]
+);
+
+snapshot_ui_with_file_and_msgs!(
+    tdm_audio_decoder_add_dialog,
+    "examples/tdm_audio.vcd",
+    [
+        Message::AddVariables(vec![
+            VariableRef::from_hierarchy_string("tb.bitclk"),
+            VariableRef::from_hierarchy_string("tb.frame_sync"),
+            VariableRef::from_hierarchy_string("tb.data"),
+        ]),
+        Message::ShowDecoderDialog(None),
+    ]
+);
+
+#[test]
+fn tdm_audio_decoder_settings_dialog() {
+    render_and_compare(
+        &Utf8PathBuf::from("tdm_audio_decoder_settings_dialog"),
+        || {
+            let mut state = SystemState::new_default_config()
+                .unwrap()
+                .with_params(StartupParams {
+                    waves: Some(WaveSource::File(
+                        get_project_root()
+                            .unwrap()
+                            .join("examples/tdm_audio.vcd")
+                            .try_into()
+                            .unwrap(),
+                    )),
+                    startup_commands: vec![],
+                    ..Default::default()
+                });
+
+            wait_for_waves_fully_loaded(&mut state, 10);
+            state.add_batch_message(Message::SetMenuVisible(false));
+            state.add_batch_message(Message::SetSidePanelVisible(false));
+            state.add_batch_message(Message::SetToolbarVisible(false));
+            state.add_batch_message(Message::SetOverviewVisible(false));
+            state.add_batch_message(Message::CloseOpenSiblingStateFileDialog {
+                load_state: false,
+                do_not_show_again: true,
+            });
+            state.add_batch_messages(vec![
+                Message::AddVariables(vec![
+                    VariableRef::from_hierarchy_string("tb.bitclk"),
+                    VariableRef::from_hierarchy_string("tb.frame_sync"),
+                    VariableRef::from_hierarchy_string("tb.data"),
+                ]),
+                Message::AddDecoder {
+                    decoder: "tdm_audio".to_string(),
+                    inputs: vec![
+                        DecoderInput {
+                            role: "bitclk".to_string(),
+                            variable_ref: VariableRef::from_hierarchy_string("tb.bitclk"),
+                        },
+                        DecoderInput {
+                            role: "frame_sync".to_string(),
+                            variable_ref: VariableRef::from_hierarchy_string("tb.frame_sync"),
+                        },
+                        DecoderInput {
+                            role: "data".to_string(),
+                            variable_ref: VariableRef::from_hierarchy_string("tb.data"),
+                        },
+                    ],
+                    settings: tdm_settings(&[
+                        ("bits", SettingValue::Integer(16)),
+                        ("channels", SettingValue::Integer(2)),
+                    ]),
+                    show_samples: true,
+                    value_format: ValueFormat::Decimal,
+                    analog: None,
+                },
+            ]);
+            wait_for_waves_fully_loaded(&mut state, 10);
+
+            // Look the item up instead of hard-coding its ref, so the test
+            // does not depend on the item creation order.
+            let item_ref = *state
+                .user
+                .waves
+                .as_ref()
+                .expect("waves")
+                .displayed_items
+                .iter()
+                .find_map(|(id, item)| {
+                    matches!(item, crate::displayed_item::DisplayedItem::Decoder(_)).then_some(id)
+                })
+                .expect("decoder item");
+            state.add_batch_message(Message::ShowDecoderDialog(Some(item_ref)));
+            wait_for_waves_fully_loaded(&mut state, 10);
+
+            state
+        },
+    );
+}
+
+snapshot_ui_with_file_and_msgs!(
+    tdm_audio_decoder_hex,
+    "examples/tdm_audio.vcd",
+    [
+        Message::AddVariables(vec![
+            VariableRef::from_hierarchy_string("tb.bitclk"),
+            VariableRef::from_hierarchy_string("tb.frame_sync"),
+            VariableRef::from_hierarchy_string("tb.data"),
+        ]),
+        Message::AddDecoder {
+            decoder: "tdm_audio".to_string(),
+            inputs: vec![
+                DecoderInput {
+                    role: "bitclk".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.bitclk"),
+                },
+                DecoderInput {
+                    role: "frame_sync".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.frame_sync"),
+                },
+                DecoderInput {
+                    role: "data".to_string(),
+                    variable_ref: VariableRef::from_hierarchy_string("tb.data"),
+                },
+            ],
+            settings: tdm_settings(&[
+                ("bits", SettingValue::Integer(16)),
+                ("channels", SettingValue::Integer(2))
+            ]),
+            show_samples: true,
+            value_format: ValueFormat::Hexadecimal,
+            analog: None,
+        },
+    ]
+);
+
+snapshot_ui_with_file_and_msgs!(
+    spdif_decoder,
+    "examples/spdif_2ch_24bit.vcd",
+    [
+        Message::AddVariables(vec![VariableRef::from_hierarchy_string("tb.data")]),
+        Message::AddDecoder {
+            decoder: "spdif".to_string(),
+            inputs: vec![DecoderInput {
+                role: "data".to_string(),
+                variable_ref: VariableRef::from_hierarchy_string("tb.data"),
+            }],
+            settings: spdif_settings(&[("word_bits", SettingValue::Enum("24".to_string()))]),
+            show_samples: true,
+            value_format: ValueFormat::Decimal,
+            analog: Some(AnalogSettings::decoder_default()),
+        },
+    ]
+);
+
+snapshot_ui_with_file_and_msgs!(
+    spdif_decoder_hex,
+    "examples/spdif_2ch_24bit.vcd",
+    [
+        Message::AddVariables(vec![VariableRef::from_hierarchy_string("tb.data")]),
+        Message::AddDecoder {
+            decoder: "spdif".to_string(),
+            inputs: vec![DecoderInput {
+                role: "data".to_string(),
+                variable_ref: VariableRef::from_hierarchy_string("tb.data"),
+            }],
+            settings: spdif_settings(&[("word_bits", SettingValue::Enum("24".to_string()))]),
+            show_samples: true,
+            value_format: ValueFormat::Hexadecimal,
+            analog: None,
+        },
+    ]
+);
+
+snapshot_ui_with_file_and_msgs!(
+    spdif_decoder_status_zoomed,
+    "examples/spdif_2ch_24bit.vcd",
+    [
+        Message::AddVariables(vec![VariableRef::from_hierarchy_string("tb.data")]),
+        Message::AddDecoder {
+            decoder: "spdif".to_string(),
+            inputs: vec![DecoderInput {
+                role: "data".to_string(),
+                variable_ref: VariableRef::from_hierarchy_string("tb.data"),
+            }],
+            settings: spdif_settings(&[("word_bits", SettingValue::Enum("24".to_string()))]),
+            show_samples: true,
+            value_format: ValueFormat::Decimal,
+            analog: None,
+        },
+        Message::ZoomToRange {
+            start: BigInt::from(0),
+            end: BigInt::from(1024),
+            viewport_idx: 0,
+        },
+    ]
+);
+
+snapshot_ui_with_file_and_msgs!(
+    spdif_decoder_failure,
+    "examples/offset_100us.vcd",
+    [
+        Message::AddVariables(vec![VariableRef::from_hierarchy_string("testbench.data")]),
+        Message::AddDecoder {
+            decoder: "spdif".to_string(),
+            inputs: vec![DecoderInput {
+                role: "data".to_string(),
+                variable_ref: VariableRef::from_hierarchy_string("testbench.data"),
+            }],
+            settings: spdif_settings(&[]),
+            show_samples: true,
+            value_format: ValueFormat::Decimal,
+            analog: None,
+        },
+    ]
+);

@@ -18,6 +18,7 @@ pub mod config;
 pub mod cxxrtl;
 pub mod cxxrtl_container;
 pub mod data_container;
+pub mod decoders;
 pub mod dialog;
 pub mod displayed_item;
 pub mod displayed_item_tree;
@@ -30,6 +31,8 @@ pub mod frame_buffer;
 pub mod fst_export;
 pub mod fzcmd;
 pub mod graphics;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod headless;
 pub mod help;
 pub mod hierarchy;
 pub mod item_drawing_info;
@@ -82,6 +85,7 @@ use crate::annotation::Annotation;
 use crate::annotation_list::AnnotationGroup;
 use crate::annotation_list::DEFAULT_GROUP_NAME;
 use crate::arrow::ArrowAnnotation;
+#[cfg(all(not(target_arch = "wasm32"), feature = "wasm_plugins"))]
 use crate::channels::checked_send;
 use crate::comment::CommentMessage;
 use crate::config::AutoLoad;
@@ -425,7 +429,162 @@ impl SystemState {
                 waves.add_all_from_stream_scope(scope_name)?;
                 self.invalidate_draw_commands();
             }
+            Message::AddDecoder {
+                decoder,
+                inputs,
+                settings,
+                show_samples,
+                value_format,
+                analog,
+            } => {
+                if !self
+                    .user
+                    .waves
+                    .as_ref()
+                    .and_then(|waves| waves.inner.as_waves())
+                    .is_some_and(WaveContainer::supports_decoders)
+                {
+                    error!("Decoders are not supported for this waveform source");
+                    return None;
+                }
+                self.save_current_canvas(format!("Add decoder {decoder}"));
+                let waves = self.user.waves.as_mut()?;
+                if let Some(cmd) = waves.add_decoder(
+                    decoder,
+                    inputs,
+                    settings,
+                    show_samples,
+                    value_format,
+                    analog,
+                ) {
+                    self.load_variables(cmd);
+                }
+                self.invalidate_draw_commands();
+            }
+            Message::SetDecoderValueFormat(target, value_format) => {
+                self.save_current_canvas("Set decoder sample format".into());
+                self.invalidate_draw_commands();
+                let waves = self.user.waves.as_mut()?;
+                let update = |item: &mut DisplayedItem| {
+                    if let DisplayedItem::Decoder(decoder) = item {
+                        decoder.value_format = value_format;
+                    }
+                };
+                match target {
+                    MessageTarget::Explicit(vidx) => {
+                        let node = waves.items_tree.get_visible(vidx)?;
+                        waves
+                            .displayed_items
+                            .entry(node.item_ref)
+                            .and_modify(update);
+                    }
+                    MessageTarget::CurrentSelection => {
+                        if let Some(focused) = waves.focused_item {
+                            let node = waves.items_tree.get_visible(focused)?;
+                            waves
+                                .displayed_items
+                                .entry(node.item_ref)
+                                .and_modify(update);
+                        }
+                        for node in waves.items_tree.iter_visible_selected() {
+                            waves
+                                .displayed_items
+                                .entry(node.item_ref)
+                                .and_modify(update);
+                        }
+                    }
+                }
+            }
+            Message::SetDecoderSamples(target, show_samples) => {
+                self.save_current_canvas("Set decoder samples".into());
+                self.invalidate_draw_commands();
+                let waves = self.user.waves.as_mut()?;
+                let update = |item: &mut DisplayedItem| {
+                    if let DisplayedItem::Decoder(decoder) = item {
+                        decoder.show_samples = show_samples;
+                    }
+                };
+                match target {
+                    MessageTarget::Explicit(vidx) => {
+                        let node = waves.items_tree.get_visible(vidx)?;
+                        waves
+                            .displayed_items
+                            .entry(node.item_ref)
+                            .and_modify(update);
+                    }
+                    MessageTarget::CurrentSelection => {
+                        if let Some(focused) = waves.focused_item {
+                            let node = waves.items_tree.get_visible(focused)?;
+                            waves
+                                .displayed_items
+                                .entry(node.item_ref)
+                                .and_modify(update);
+                        }
+                        for node in waves.items_tree.iter_visible_selected() {
+                            waves
+                                .displayed_items
+                                .entry(node.item_ref)
+                                .and_modify(update);
+                        }
+                    }
+                }
+            }
             Message::InvalidateCount => self.user.count = None,
+            Message::ShowDecoderDialog(item) => {
+                let dialog = match item {
+                    Some(item_ref) => {
+                        let waves = self.user.waves.as_ref()?;
+                        let Some(DisplayedItem::Decoder(displayed)) =
+                            waves.displayed_items.get(&item_ref)
+                        else {
+                            return None;
+                        };
+                        let decoder = crate::decoders::decoder_by_id(&displayed.decoder)?;
+                        crate::dialog::DecoderDialog::from_displayed(item_ref, displayed, &*decoder)
+                    }
+                    None => {
+                        self.user.waves.as_ref()?;
+                        let decoder = crate::decoders::all_decoders().first().cloned()?;
+                        crate::dialog::DecoderDialog::new(&*decoder)
+                    }
+                };
+                self.decoder_dialog = Some(dialog);
+            }
+            Message::HideDecoderDialog => {
+                self.decoder_dialog = None;
+            }
+            Message::UpdateDecoder {
+                item,
+                decoder: decoder_id,
+                inputs,
+                settings,
+                show_samples,
+                value_format,
+                analog,
+            } => {
+                self.save_current_canvas("Update decoder".into());
+                let decoder_impl = crate::decoders::decoder_by_id(&decoder_id)?;
+                let waves = self.user.waves.as_mut()?;
+                let Some(DisplayedItem::Decoder(decoder)) = waves.displayed_items.get_mut(&item)
+                else {
+                    return None;
+                };
+                decoder.rows = decoder_impl.row_count(&inputs, &settings);
+                decoder.decoder = decoder_id;
+                decoder.display_name = decoder_impl.display_name().to_string();
+                decoder.row_names.clear();
+                decoder.inputs = inputs;
+                decoder.settings = settings;
+                decoder.show_samples = show_samples;
+                decoder.value_format = value_format;
+                decoder.analog = analog;
+                decoder.cache = None;
+                let cmd = waves.load_waves();
+                if let Some(cmd) = cmd {
+                    self.load_variables(cmd);
+                }
+                self.invalidate_draw_commands();
+            }
             Message::SetNameAlignRight(align_right) => {
                 self.user.align_names_right = Some(align_right);
             }
@@ -1095,17 +1254,19 @@ impl SystemState {
                 let waves = self.user.waves.as_mut()?;
 
                 // Update settings while preserving existing cache
-                let update = |item: &mut DisplayedItem| {
-                    if let DisplayedItem::Variable(var) = item {
-                        match (&mut var.analog, new_settings) {
-                            (Some(s), Some(new)) => s.settings = new,
-                            (None, Some(new)) => {
-                                var.analog = Some(AnalogVarState::new(new));
-                                var.height_scaling_factor = Some(analog_waveform_multiplier);
-                            }
-                            (_, None) => var.analog = None,
+                let update = |item: &mut DisplayedItem| match item {
+                    DisplayedItem::Variable(var) => match (&mut var.analog, new_settings) {
+                        (Some(s), Some(new)) => s.settings = new,
+                        (None, Some(new)) => {
+                            var.analog = Some(AnalogVarState::new(new));
+                            var.height_scaling_factor = Some(analog_waveform_multiplier);
                         }
+                        (_, None) => var.analog = None,
+                    },
+                    DisplayedItem::Decoder(decoder) => {
+                        decoder.analog = new_settings;
                     }
+                    _ => {}
                 };
 
                 match vidx {
@@ -2378,6 +2539,141 @@ impl SystemState {
                 }
                 self.invalidate_draw_commands();
             }
+            Message::BuildDecoderCache {
+                display_id,
+                cache_key,
+            } => {
+                let waves = self.user.waves.as_mut()?;
+                let generation = waves.cache_generation;
+
+                // Check if a matching entry is already present (building or ready)
+                let item = waves.displayed_items.get(&display_id)?;
+                let DisplayedItem::Decoder(decoder) = item else {
+                    return None;
+                };
+                if decoder
+                    .cache
+                    .as_ref()
+                    .is_some_and(|entry| entry.generation == generation && entry.key == cache_key)
+                {
+                    return None;
+                }
+
+                let (decoder_id, inputs, settings) = match waves.displayed_items.get(&display_id)? {
+                    DisplayedItem::Decoder(decoder) => (
+                        decoder.decoder.clone(),
+                        decoder.inputs.clone(),
+                        decoder.settings.clone(),
+                    ),
+                    _ => return None,
+                };
+                let Some(decoder_impl) = crate::decoders::decoder_by_id(&decoder_id) else {
+                    // A state file can reference a decoder whose schema is no
+                    // longer available. Store the failure so the item shows an
+                    // error instead of retrying forever.
+                    let entry = Arc::new(crate::decoders::DecoderCacheEntry::new(
+                        cache_key, generation,
+                    ));
+                    entry.set(Err(format!("unknown decoder '{decoder_id}'")));
+                    if let Some(DisplayedItem::Decoder(decoder)) =
+                        waves.displayed_items.get_mut(&display_id)
+                    {
+                        decoder.cache = Some(entry);
+                    }
+                    return None;
+                };
+
+                let wave_container = waves.inner.as_waves()?;
+                if !cache_key
+                    .0
+                    .iter()
+                    .all(|signal_id| wave_container.is_signal_loaded(signal_id))
+                {
+                    // Inputs are still loading; retry when `SignalsLoaded` invalidates draw commands.
+                    return None;
+                }
+                let resolved = match crate::decoders::resolve_inputs(wave_container, &inputs) {
+                    Ok(resolved) => resolved,
+                    Err(e) => {
+                        let message = format!("cannot resolve decoder inputs: {e:#}");
+                        let entry = Arc::new(crate::decoders::DecoderCacheEntry::new(
+                            cache_key, generation,
+                        ));
+                        entry.set(Err(message));
+                        if let Some(DisplayedItem::Decoder(decoder)) =
+                            waves.displayed_items.get_mut(&display_id)
+                        {
+                            decoder.cache = Some(entry);
+                        }
+                        return None;
+                    }
+                };
+
+                let entry = Arc::new(crate::decoders::DecoderCacheEntry::new(
+                    cache_key, generation,
+                ));
+                if let DisplayedItem::Decoder(decoder) =
+                    waves.displayed_items.get_mut(&display_id)?
+                {
+                    decoder.cache = Some(entry.clone());
+                }
+
+                let sender = self.channels.msg_sender.clone();
+                crate::async_util::perform_work(move || {
+                    // A panic in a decoder must not leave the item stuck on
+                    // "Building..." forever.
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        decoder_impl.decode(&crate::decoders::DecoderContext {
+                            inputs: &resolved,
+                            settings: &settings,
+                        })
+                    }))
+                    .map_or_else(
+                        |_| Err("decoder panicked".to_string()),
+                        |result| result.map(Arc::new).map_err(|e| format!("{e:#}")),
+                    );
+                    let _ = sender.send(Message::DecoderCacheBuilt {
+                        display_id,
+                        entry,
+                        result,
+                    });
+                    if let Some(ctx) = EGUI_CONTEXT.read().unwrap().as_ref() {
+                        ctx.request_repaint();
+                    }
+                });
+            }
+            Message::DecoderCacheBuilt {
+                display_id,
+                entry,
+                result,
+            } => {
+                match result {
+                    Ok(data) => {
+                        // Only apply the row names if this is still the cache
+                        // the item is using; a late result from before an
+                        // edit or reload must not clobber the name column.
+                        if let Some(DisplayedItem::Decoder(decoder)) = self
+                            .user
+                            .waves
+                            .as_mut()
+                            .and_then(|waves| waves.displayed_items.get_mut(&display_id))
+                            && decoder
+                                .cache
+                                .as_ref()
+                                .is_some_and(|current| Arc::ptr_eq(current, &entry))
+                        {
+                            decoder.row_names =
+                                data.rows.iter().map(|row| row.name.clone()).collect();
+                        }
+                        entry.set(Ok(data));
+                    }
+                    Err(e) => {
+                        error!("Failed to decode: {e}");
+                        entry.set(Err(e));
+                    }
+                }
+                self.invalidate_draw_commands();
+            }
             Message::Exit | Message::ToggleFullscreen => {} // Handled in eframe::update
             Message::AddViewport => {
                 let waves = self.user.waves.as_mut()?;
@@ -2802,5 +3098,129 @@ pub struct StateWrapper(Arc<RwLock<SystemState>>);
 impl App for StateWrapper {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         App::ui(&mut *self.0.write().unwrap(), ui, frame);
+    }
+}
+
+#[cfg(test)]
+mod decoder_cache_tests {
+    use super::*;
+    use crate::decoders::{DecoderInput, DecoderSettings, ValueFormat, cache_key};
+    use crate::displayed_item::DisplayedDecoder;
+    use crate::wave_source::WaveSource;
+
+    fn install_runtime() -> tokio::runtime::EnterGuard<'static> {
+        let runtime: &'static tokio::runtime::Runtime = Box::leak(Box::new(
+            tokio::runtime::Builder::new_current_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap(),
+        ));
+        std::thread::spawn(move || {
+            runtime.block_on(async {
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+                }
+            });
+        });
+        runtime.enter()
+    }
+
+    #[test]
+    fn unknown_decoder_id_records_an_error_cache() {
+        let _guard = install_runtime();
+
+        let root = project_root::get_project_root().expect("project root");
+        let mut state = SystemState::new_default_config()
+            .unwrap()
+            .with_params(StartupParams {
+                waves: Some(WaveSource::File(
+                    root.join("examples/tdm_audio.vcd")
+                        .try_into()
+                        .expect("utf-8 example path"),
+                )),
+                ..Default::default()
+            });
+
+        let start = std::time::Instant::now();
+        loop {
+            state.handle_async_messages();
+            state.handle_batch_commands();
+            if state.waves_fully_loaded() {
+                break;
+            }
+            assert!(start.elapsed().as_secs() < 10, "timeout loading waveform");
+        }
+
+        let inputs = ["bitclk", "frame_sync", "data"]
+            .iter()
+            .map(|role| DecoderInput {
+                role: (*role).to_string(),
+                variable_ref: crate::wave_container::VariableRef::from_hierarchy_string(&format!(
+                    "tb.{role}"
+                )),
+            })
+            .collect::<Vec<_>>();
+        let settings = DecoderSettings::default();
+
+        // Build an item that refers to a decoder id no longer in the registry,
+        // as loading an outdated state file would.
+        let display_id = {
+            let waves = state.user.waves.as_mut().expect("waves");
+            let id = waves.insert_item(
+                DisplayedItem::Decoder(DisplayedDecoder {
+                    decoder: "tdm_audio".to_string(),
+                    inputs: inputs.clone(),
+                    settings: settings.clone(),
+                    display_name: "TDM Audio".to_string(),
+                    manual_name: None,
+                    color: None,
+                    background_color: None,
+                    rows: 2,
+                    show_samples: true,
+                    value_format: ValueFormat::Decimal,
+                    analog: None,
+                    height_scaling_factor: None,
+                    row_names: Vec::new(),
+                    cache: None,
+                }),
+                None,
+                false,
+            );
+            let DisplayedItem::Decoder(decoder) = waves
+                .displayed_items
+                .get_mut(&id)
+                .expect("inserted decoder item")
+            else {
+                unreachable!()
+            };
+            decoder.decoder = "does_not_exist".to_string();
+            id
+        };
+        let cache_key = {
+            let waves = state.user.waves.as_ref().expect("waves");
+            let container = waves.inner.as_waves().expect("wave container");
+            cache_key(container, &inputs, &settings).expect("cache key")
+        };
+
+        state.update(Message::BuildDecoderCache {
+            display_id,
+            cache_key,
+        });
+
+        let waves = state.user.waves.as_ref().expect("waves");
+        let DisplayedItem::Decoder(decoder) = waves
+            .displayed_items
+            .get(&display_id)
+            .expect("decoder item")
+        else {
+            panic!("expected a decoder item");
+        };
+        let entry = decoder.cache.as_ref().expect("error cache entry");
+        assert!(entry.is_ready());
+        assert!(matches!(
+            entry.get(),
+            Some(Err(message)) if message.contains("unknown decoder")
+        ));
     }
 }

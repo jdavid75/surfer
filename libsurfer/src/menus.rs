@@ -284,6 +284,9 @@ impl SystemState {
                 .enabled(waves_loaded)
                 .add_closing_menu(msgs, ui);
             ui.separator();
+            b("Add decoder…", Message::ShowDecoderDialog(None))
+                .enabled(waves_loaded)
+                .add_closing_menu(msgs, ui);
 
             b(
                 "Toggle side panel",
@@ -732,9 +735,58 @@ impl SystemState {
                         Self::analog_submenu(
                             ui,
                             msgs,
-                            variable,
+                            variable.analog.as_ref().map(|a| a.settings),
+                            crate::displayed_item::AnalogSettings::default(),
                             group_target,
                             type_limits_available,
+                        );
+                    });
+            }
+        }
+
+        if let DisplayedItem::Decoder(decoder) = clicked_item {
+            if ui.button("Decoder settings…").clicked() {
+                msgs.push(Message::ShowDecoderDialog(Some(clicked_item_ref)));
+                ui.close();
+            }
+
+            let mut show_samples = decoder.show_samples;
+            if ui.checkbox(&mut show_samples, "Show samples").changed() {
+                msgs.push(Message::SetDecoderSamples(group_target, show_samples));
+            }
+
+            ui.menu_button("Sample format", |ui| {
+                for format in [
+                    crate::decoders::ValueFormat::Decimal,
+                    crate::decoders::ValueFormat::Hexadecimal,
+                ] {
+                    if ui
+                        .radio(decoder.value_format == format, format.label())
+                        .clicked()
+                    {
+                        msgs.push(Message::SetDecoderValueFormat(group_target, format));
+                        ui.close();
+                    }
+                }
+            });
+
+            if waves
+                .inner
+                .as_waves()
+                .is_some_and(|waves| waves.supports_analog())
+            {
+                SubMenuButton::new("Analog")
+                    .config(
+                        MenuConfig::new().close_behavior(PopupCloseBehavior::CloseOnClickOutside),
+                    )
+                    .ui(ui, |ui| {
+                        Self::analog_submenu(
+                            ui,
+                            msgs,
+                            decoder.analog,
+                            crate::displayed_item::AnalogSettings::decoder_default(),
+                            group_target,
+                            true,
                         );
                     });
             }
@@ -856,13 +908,13 @@ impl SystemState {
     fn analog_submenu(
         ui: &mut Ui,
         msgs: &mut Vec<Message>,
-        variable: &crate::displayed_item::DisplayedVariable,
+        current: Option<crate::displayed_item::AnalogSettings>,
+        default_settings: crate::displayed_item::AnalogSettings,
         group_target: MessageTarget<VisibleItemIndex>,
         type_limits_available: bool,
     ) {
         use crate::displayed_item::{AnalogRenderStyle, AnalogSettings, AnalogYAxisScale};
 
-        let current = variable.analog.as_ref().map(|a| a.settings);
         let current_style = current.map(|s| s.render_style);
         let current_scale = current.map(|s| s.y_axis_scale);
 
@@ -878,7 +930,7 @@ impl SystemState {
             {
                 let new = AnalogSettings {
                     render_style: style,
-                    ..current.unwrap_or_default()
+                    ..current.unwrap_or(default_settings)
                 };
                 msgs.push(Message::SetAnalogSettings(group_target, Some(new)));
             }
@@ -895,7 +947,7 @@ impl SystemState {
             {
                 let new = AnalogSettings {
                     y_axis_scale: scale,
-                    ..current.unwrap_or_default()
+                    ..current.unwrap_or(default_settings)
                 };
                 msgs.push(Message::SetAnalogSettings(group_target, Some(new)));
             }
@@ -911,7 +963,7 @@ impl SystemState {
         } else if response.clicked() && current_scale != Some(scale) {
             let new = AnalogSettings {
                 y_axis_scale: scale,
-                ..current.unwrap_or_default()
+                ..current.unwrap_or(default_settings)
             };
             msgs.push(Message::SetAnalogSettings(group_target, Some(new)));
         }
@@ -1043,6 +1095,9 @@ pub fn generic_context_menu(msgs: &mut Vec<Message>, response: &egui::Response) 
         }
         if ui.button("Add timeline").clicked() {
             msgs.push(Message::AddTimeLine(None));
+        }
+        if ui.button("Add decoder…").clicked() {
+            msgs.push(Message::ShowDecoderDialog(None));
         }
     });
 }

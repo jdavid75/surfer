@@ -505,11 +505,22 @@ mod tests {
     #[test]
     fn extend_string_weird_char_and_empty_input() {
         // Unknown leading char results in no extension (empty), even if num_bits is larger
-        assert_eq!(extend_string("h101", 6), "");
+        assert_eq!(extend_string("?101", 6), "");
         assert_eq!(extend_string("?", 10), "");
 
         // Empty input yields empty extension as there is no leading char to guide
         assert_eq!(extend_string("", 5), "");
+    }
+
+    #[test]
+    fn extend_string_std_logic_values() {
+        // Non-standard std_logic values extend with themselves so that
+        // simulators saving without extension can still be decoded
+        assert_eq!(extend_string("u1", 4), "uu");
+        assert_eq!(extend_string("w", 3), "ww");
+        assert_eq!(extend_string("l", 2), "l");
+        assert_eq!(extend_string("h101", 6), "hh");
+        assert_eq!(extend_string("-", 4), "---");
     }
 
     // ---------------- parse_numeric_string tests ----------------

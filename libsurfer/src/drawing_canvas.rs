@@ -52,6 +52,180 @@ pub struct DrawnRegion {
 pub enum DrawingCommands {
     Digital(DigitalDrawingCommands),
     Analog(AnalogDrawingCommands),
+    Decoder(DecoderDrawingCommands),
+}
+
+#[derive(Default)]
+pub struct DecoderDrawingCommands {
+    pub loading: bool,
+    pub error: Option<String>,
+    pub samples: Option<Vec<Vec<DecoderCell>>>,
+    pub analog: Option<Vec<Option<AnalogDrawingCommands>>>,
+}
+
+pub struct DecoderCell {
+    pub x_start: f32,
+    pub x_end: f32,
+    pub row: String,
+    pub start: BigUint,
+    pub end: BigUint,
+    pub text: String,
+    pub kind: ValueKind,
+}
+
+impl DecoderDrawingCommands {
+    /// Indices of the items that can affect the visible range, plus one item
+    /// on each side so that cells and segments crossing the viewport edge are
+    /// still drawn.
+    fn visible_item_range(
+        items: &[crate::decoders::DecodedItem],
+        range: &TimeRange,
+    ) -> std::ops::Range<usize> {
+        let start = items
+            .partition_point(|item| BigInt::from(item.start.clone()) < range.start)
+            .saturating_sub(1);
+        let end = (items.partition_point(|item| BigInt::from(item.start.clone()) <= range.end) + 1)
+            .min(items.len());
+        start..end.max(start)
+    }
+
+    fn samples_from_decoded(
+        format: crate::decoders::ValueFormat,
+        decoded: &crate::decoders::DecodedData,
+        viewport: &Viewport,
+        view_width: f32,
+        range: &TimeRange,
+    ) -> Vec<Vec<DecoderCell>> {
+        decoded
+            .rows
+            .iter()
+            .map(|row| {
+                let visible = Self::visible_item_range(&row.items, range);
+                row.items[visible.clone()]
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, item)| {
+                        let index = visible.start + offset;
+                        let x_start = viewport.pixel_from_time(
+                            &BigInt::from(item.start.clone()),
+                            view_width,
+                            range,
+                        );
+                        let end_time = row
+                            .items
+                            .get(index + 1)
+                            .map_or(&item.end, |next| &next.start);
+                        let x_end = viewport.pixel_from_time(
+                            &BigInt::from(end_time.clone()),
+                            view_width,
+                            range,
+                        );
+                        DecoderCell {
+                            x_start,
+                            x_end,
+                            row: row.name.clone(),
+                            start: item.start.clone(),
+                            end: end_time.clone(),
+                            text: item.value.format(format),
+                            kind: item.value.kind(),
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn analog_from_decoded(
+        decoded: &crate::decoders::DecodedData,
+        analog_settings: AnalogSettings,
+        viewport: &Viewport,
+        view_width: f32,
+        range: &TimeRange,
+    ) -> Vec<Option<AnalogDrawingCommands>> {
+        let min_valid_pixel = viewport.pixel_from_time(&BigInt::from(0), view_width, range);
+        let max_valid_pixel = viewport.pixel_from_time(&range.end, view_width, range);
+        decoded
+            .rows
+            .iter()
+            .map(|row| {
+                if !row
+                    .items
+                    .iter()
+                    .any(|item| matches!(item.value, crate::decoders::DecodedValue::Integer { .. }))
+                {
+                    return None;
+                }
+                // The global range is over the whole row, so `Global` scaling
+                // stays stable while scrolling, but only the visible commands
+                // are materialized.
+                let mut global_min = f64::INFINITY;
+                let mut global_max = f64::NEG_INFINITY;
+                for item in &row.items {
+                    let value = item.value.analog_value();
+                    if value.is_finite() {
+                        global_min = global_min.min(value);
+                        global_max = global_max.max(value);
+                    }
+                }
+
+                let visible = Self::visible_item_range(&row.items, range);
+                let mut values = Vec::with_capacity(visible.len());
+                let mut viewport_min = f64::INFINITY;
+                let mut viewport_max = f64::NEG_INFINITY;
+                for index in visible {
+                    let item = &row.items[index];
+                    let start_px = viewport.pixel_from_time(
+                        &BigInt::from(item.start.clone()),
+                        view_width,
+                        range,
+                    );
+                    let end_time = row
+                        .items
+                        .get(index + 1)
+                        .map_or(&item.end, |next| &next.start);
+                    let end_px = viewport.pixel_from_time(
+                        &BigInt::from(end_time.clone()),
+                        view_width,
+                        range,
+                    );
+                    let value = item.value.analog_value();
+                    let next_value = row
+                        .items
+                        .get(index + 1)
+                        .map_or(value, |next| next.value.analog_value());
+                    if value.is_finite() && end_px >= 0.0 && start_px <= view_width {
+                        viewport_min = viewport_min.min(value);
+                        viewport_max = viewport_max.max(value);
+                    }
+                    values.push(AnalogDrawingCommand::Flat {
+                        start_px,
+                        start_val: value,
+                        end_px,
+                        end_val: next_value,
+                    });
+                }
+                if !global_min.is_finite() {
+                    global_min = 0.0;
+                    global_max = 1.0;
+                }
+                if !viewport_min.is_finite() {
+                    viewport_min = global_min;
+                    viewport_max = global_max;
+                }
+                Some(AnalogDrawingCommands::Ready {
+                    viewport_min,
+                    viewport_max,
+                    global_min,
+                    global_max,
+                    type_limits: row.numeric_range,
+                    values,
+                    min_valid_pixel,
+                    max_valid_pixel,
+                    analog_settings,
+                })
+            })
+            .collect()
+    }
 }
 
 pub enum AnalogDrawingCommands {
@@ -486,6 +660,111 @@ impl SystemState {
             }
         }
 
+        for (id, item) in waves
+            .items_tree
+            .iter_visible()
+            .map(|node| (node.item_ref, waves.displayed_items.get(&node.item_ref)))
+        {
+            let Some(DisplayedItem::Decoder(displayed_decoder)) = item else {
+                continue;
+            };
+            let Some(wave_container) = waves.inner.as_waves() else {
+                continue;
+            };
+            if !wave_container.supports_decoders() {
+                continue;
+            }
+            let field = DisplayedFieldRef {
+                item: id,
+                field: vec![],
+            };
+            let cache_key = match crate::decoders::cache_key(
+                wave_container,
+                &displayed_decoder.inputs,
+                &displayed_decoder.settings,
+            ) {
+                Ok(cache_key) => cache_key,
+                Err(error) => {
+                    draw_commands.insert(
+                        field,
+                        DrawingCommands::Decoder(DecoderDrawingCommands {
+                            error: Some(error.to_string()),
+                            ..Default::default()
+                        }),
+                    );
+                    continue;
+                }
+            };
+
+            let decoded = match &displayed_decoder.cache {
+                Some(entry)
+                    if entry.generation == waves.cache_generation && entry.key == cache_key =>
+                {
+                    match entry.get() {
+                        Some(Ok(decoded)) => decoded.clone(),
+                        Some(Err(error)) => {
+                            draw_commands.insert(
+                                field,
+                                DrawingCommands::Decoder(DecoderDrawingCommands {
+                                    error: Some(error.clone()),
+                                    ..Default::default()
+                                }),
+                            );
+                            continue;
+                        }
+                        None => {
+                            draw_commands.insert(
+                                field,
+                                DrawingCommands::Decoder(DecoderDrawingCommands {
+                                    loading: true,
+                                    ..Default::default()
+                                }),
+                            );
+                            continue;
+                        }
+                    }
+                }
+                _ => {
+                    msgs.push(Message::BuildDecoderCache {
+                        display_id: id,
+                        cache_key,
+                    });
+                    draw_commands.insert(
+                        field,
+                        DrawingCommands::Decoder(DecoderDrawingCommands {
+                            loading: true,
+                            ..Default::default()
+                        }),
+                    );
+                    continue;
+                }
+            };
+
+            let commands = DecoderDrawingCommands {
+                loading: false,
+                error: None,
+                samples: displayed_decoder.show_samples.then(|| {
+                    DecoderDrawingCommands::samples_from_decoded(
+                        displayed_decoder.value_format,
+                        &decoded,
+                        &viewport,
+                        cfg.canvas_size.x,
+                        range,
+                    )
+                }),
+                analog: displayed_decoder.analog.map(|analog_settings| {
+                    DecoderDrawingCommands::analog_from_decoded(
+                        &decoded,
+                        analog_settings,
+                        &viewport,
+                        cfg.canvas_size.x,
+                        range,
+                    )
+                }),
+            };
+            draw_commands.insert(field, DrawingCommands::Decoder(commands));
+        }
+
         let clock_edges = self.get_clock_hightlight_data(clock_edges_by_clock);
 
         let ticks = self.get_ticks_for_viewport_idx(waves, viewport_idx, cfg);
@@ -876,7 +1155,7 @@ impl SystemState {
 
         match &self.draw_data.borrow()[viewport_idx] {
             Some(CachedDrawData::WaveDrawData(draw_data)) => {
-                self.draw_wave_data(waves, draw_data, row_offset, &mut ctx);
+                self.draw_wave_data(waves, draw_data, row_offset, ui, &mut ctx);
             }
             Some(CachedDrawData::TransactionDrawData(draw_data)) => {
                 self.draw_transaction_data(
@@ -975,6 +1254,7 @@ impl SystemState {
         waves: &WaveData,
         draw_data: &CachedWaveDrawData,
         row_offset: f32,
+        ui: &mut Ui,
         ctx: &mut DrawingContext,
     ) {
         let clock_edges = &draw_data.clock_edges;
@@ -1149,6 +1429,7 @@ impl SystemState {
                                     ctx,
                                 );
                             }
+                            DrawingCommands::Decoder(_) => {}
                         }
                     }
                 }
@@ -1198,6 +1479,129 @@ impl SystemState {
                     waves.draw_ticks(text_color, ticks, ctx, wave_y_offset, Align2::CENTER_TOP);
                 }
                 ItemDrawingInfo::Stream(_) => {}
+                ItemDrawingInfo::Decoder(decoder_info) => {
+                    let Some(DrawingCommands::Decoder(commands)) =
+                        draw_commands.get(&DisplayedFieldRef {
+                            item: decoder_info.item,
+                            field: vec![],
+                        })
+                    else {
+                        continue;
+                    };
+                    let row_height = drawing_info.height() / (decoder_info.rows + 1) as f32;
+                    if commands.loading {
+                        ctx.painter.text(
+                            (ctx.to_screen)(
+                                ctx.cfg.canvas_size.x * 0.5,
+                                y_offset + drawing_info.height() * 0.5,
+                            ),
+                            Align2::CENTER_CENTER,
+                            "Building…",
+                            FontId::monospace(ctx.cfg.text_size),
+                            self.user.config.theme.foreground.gamma_multiply(0.6),
+                        );
+                        continue;
+                    }
+                    if let Some(error) = &commands.error {
+                        let color = ctx.theme.accent_error.background;
+                        let galley = ctx.painter.layout_no_wrap(
+                            format!("Decoder failed: {error}"),
+                            FontId::monospace(ctx.cfg.text_size),
+                            color,
+                        );
+                        let pos = (ctx.to_screen)(
+                            ctx.cfg.text_size * 0.5,
+                            y_offset + (drawing_info.height() - galley.size().y) * 0.5,
+                        );
+                        ctx.painter.galley(pos, galley, color);
+                        continue;
+                    }
+                    if let Some(rows) = &commands.samples {
+                        let background =
+                            self.get_background_color(waves, drawing_info.vidx(), item_count);
+                        let text_color = self.user.config.theme.get_best_text_color(background);
+                        let text_size = ctx.cfg.text_size;
+                        for (row, cells) in rows.iter().enumerate() {
+                            let row_top = y_offset + (row + 1) as f32 * row_height;
+                            for cell in cells {
+                                let visible_left = cell.x_start.max(0.0);
+                                let visible_right = cell.x_end.min(ctx.cfg.canvas_size.x);
+                                if visible_right <= visible_left {
+                                    continue;
+                                }
+                                let min = (ctx.to_screen)(cell.x_start, row_top);
+                                let max = (ctx.to_screen)(cell.x_end, row_top + row_height);
+                                let rect = Rect::from_min_max(min, max);
+                                let cell_color = cell.kind.color(
+                                    color.unwrap_or(self.user.config.theme.variable_default),
+                                    ctx.theme,
+                                );
+                                ctx.painter.rect_filled(
+                                    rect,
+                                    CornerRadius::same(2),
+                                    cell_color.gamma_multiply(0.25),
+                                );
+                                let (text_pos, align) =
+                                    if cell.x_start >= 0.0 && cell.x_end <= ctx.cfg.canvas_size.x {
+                                        (rect.center(), Align2::CENTER_CENTER)
+                                    } else {
+                                        (
+                                            (ctx.to_screen)(
+                                                visible_left + ctx.cfg.text_size * 0.5,
+                                                row_top + row_height * 0.5,
+                                            ),
+                                            Align2::LEFT_CENTER,
+                                        )
+                                    };
+                                ctx.painter.text(
+                                    text_pos,
+                                    align,
+                                    &cell.text,
+                                    FontId::monospace(text_size),
+                                    text_color,
+                                );
+                                let time_scale = &waves.inner.metadata().timescale;
+                                let start = crate::time::time_string(
+                                    &BigInt::from(cell.start.clone()),
+                                    time_scale,
+                                    &self.user.wanted_timeunit,
+                                    &self.get_time_format(),
+                                );
+                                let end = crate::time::time_string(
+                                    &BigInt::from(cell.end.clone()),
+                                    time_scale,
+                                    &self.user.wanted_timeunit,
+                                    &self.get_time_format(),
+                                );
+                                let _ =
+                                    ui.allocate_rect(rect, Sense::hover())
+                                        .on_hover_text(format!(
+                                            "{}: {} @ [{} .. {}]",
+                                            cell.row, cell.text, start, end
+                                        ));
+                            }
+                        }
+                    }
+                    if let Some(channels) = &commands.analog {
+                        let gap = self.user.config.layout.waveforms_gap;
+                        let channel_color =
+                            color.unwrap_or(self.user.config.theme.variable_default);
+                        for (row, channel_commands) in channels.iter().enumerate() {
+                            let Some(channel_commands) = channel_commands else {
+                                continue;
+                            };
+                            let row_top = y_offset + (row + 1) as f32 * row_height;
+                            crate::analog_renderer::draw_analog(
+                                channel_commands,
+                                channel_color,
+                                row_top + gap,
+                                1.0,
+                                None,
+                                ctx,
+                            );
+                        }
+                    }
+                }
                 ItemDrawingInfo::Placeholder(_) => {}
             }
         }
@@ -1374,6 +1778,7 @@ impl SystemState {
                 ItemDrawingInfo::Variable(_) => {}
                 ItemDrawingInfo::Divider(_) => {}
                 ItemDrawingInfo::Marker(_) => {}
+                ItemDrawingInfo::Decoder(_) => {}
                 ItemDrawingInfo::Group(_) => {}
                 ItemDrawingInfo::Placeholder(_) => {}
             }

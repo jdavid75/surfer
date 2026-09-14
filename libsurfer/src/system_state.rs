@@ -115,6 +115,8 @@ pub struct SystemState {
     pub(crate) frame_buffer_pixel_cache: Option<FrameBufferPixelCache>,
     pub(crate) memory_viewer: MemoryViewerState,
     pub(crate) memory_viewer_cache: Option<MemoryViewerCache>,
+    /// Transient state for the add/edit decoder dialog.
+    pub(crate) decoder_dialog: Option<crate::dialog::DecoderDialog>,
     // Benchmarking stuff
     /// Invalidate draw commands every frame to make performance comparison easier
     pub(crate) continuous_redraw: bool,
@@ -202,6 +204,7 @@ impl SystemState {
             frame_buffer_pixel_cache: None,
             memory_viewer: MemoryViewerState::default(),
             memory_viewer_cache: None,
+            decoder_dialog: None,
             url_callback: None,
             continuous_redraw: false,
             #[cfg(feature = "performance_plot")]

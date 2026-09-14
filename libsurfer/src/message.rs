@@ -14,6 +14,7 @@ use crate::arrow::{ArrowHeadMode, WavePoint};
 use crate::async_util::AsyncJob;
 use crate::comment::Comment;
 use crate::config::{FocusHighlight, PrimaryMouseDrag, TransitionValue};
+use crate::decoders::{DecodedData, DecoderCacheEntry, DecoderInput, DecoderSettings, ValueFormat};
 use crate::displayed_item_tree::{ItemIndex, VisibleItemIndex};
 use crate::frame_buffer::FrameBufferColorMode;
 use crate::graphics::{Graphic, GraphicId, GraphicsY};
@@ -32,7 +33,7 @@ use crate::{
     clock_highlighting::ClockHighlightType,
     config::ArrowKeyBindings,
     dialog::{OpenSiblingStateFileDialog, ReloadWaveformDialog},
-    displayed_item::{DisplayedFieldRef, DisplayedItemRef},
+    displayed_item::{AnalogSettings, DisplayedFieldRef, DisplayedItemRef},
     file_dialog::OpenMode,
     hierarchy::HierarchyStyle,
     time::{TimeStringFormatting, TimeUnit},
@@ -93,6 +94,28 @@ pub enum Message {
     AddStreamOrGenerator(TransactionStreamRef),
     AddStreamOrGeneratorFromName(Option<StreamScopeRef>, String),
     AddAllFromStreamScope(String),
+    AddDecoder {
+        decoder: String,
+        inputs: Vec<DecoderInput>,
+        settings: DecoderSettings,
+        show_samples: bool,
+        value_format: ValueFormat,
+        analog: Option<AnalogSettings>,
+    },
+    SetDecoderSamples(MessageTarget<VisibleItemIndex>, bool),
+    SetDecoderValueFormat(MessageTarget<VisibleItemIndex>, ValueFormat),
+    /// Open the add (`None`) or edit (`Some`) decoder dialog.
+    ShowDecoderDialog(Option<DisplayedItemRef>),
+    HideDecoderDialog,
+    UpdateDecoder {
+        item: DisplayedItemRef,
+        decoder: String,
+        inputs: Vec<DecoderInput>,
+        settings: DecoderSettings,
+        show_samples: bool,
+        value_format: ValueFormat,
+        analog: Option<AnalogSettings>,
+    },
     /// Reset the repeat command counter.
     InvalidateCount,
     RemoveVisibleItems(MessageTarget<VisibleItemIndex>),
@@ -464,6 +487,18 @@ pub enum Message {
         entry: Arc<crate::analog_signal_cache::AnalogCacheEntry>,
         #[debug(skip)]
         result: Result<crate::analog_signal_cache::AnalogSignalCache, String>,
+    },
+    BuildDecoderCache {
+        display_id: DisplayedItemRef,
+        cache_key: crate::decoders::DecoderCacheKey,
+    },
+    #[serde(skip)]
+    DecoderCacheBuilt {
+        display_id: DisplayedItemRef,
+        #[debug(skip)]
+        entry: Arc<DecoderCacheEntry>,
+        #[debug(skip)]
+        result: Result<Arc<DecodedData>, String>,
     },
 
     SetViewportStrategy(ViewportStrategy),

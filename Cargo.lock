@@ -5165,6 +5165,7 @@ dependencies = [
  "libsurfer",
  "png",
  "ron",
+ "serde_json",
  "simple-eyre",
  "surver",
  "tokio",

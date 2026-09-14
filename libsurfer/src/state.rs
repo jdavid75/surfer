@@ -672,6 +672,18 @@ impl SystemState {
             .is_none_or(|w| w.inflight_caches.is_empty())
     }
 
+    /// Returns true if all decoder caches have finished building (or failed).
+    pub fn decoder_caches_ready(&self) -> bool {
+        self.user.waves.as_ref().is_none_or(|waves| {
+            waves.displayed_items.values().all(|item| match item {
+                crate::displayed_item::DisplayedItem::Decoder(decoder) => {
+                    decoder.cache.as_ref().is_none_or(|entry| entry.is_ready())
+                }
+                _ => true,
+            })
+        })
+    }
+
     /// Returns the current canvas state
     pub(crate) fn current_canvas_state(waves: &WaveData, message: String) -> CanvasState {
         CanvasState {

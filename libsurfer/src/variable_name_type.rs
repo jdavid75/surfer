@@ -77,6 +77,7 @@ impl WaveData {
                     DisplayedItem::TimeLine(_) => {}
                     DisplayedItem::Placeholder(_) => {}
                     DisplayedItem::Stream(_) => {}
+                    DisplayedItem::Decoder(_) => {}
                     DisplayedItem::Group(_) => {}
                 });
         }

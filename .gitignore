@@ -6,6 +6,7 @@
 trunk
 
 snapshots/*.diff.png
+snapshots/*.new.png
 *.profraw
 
 *~

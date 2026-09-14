@@ -174,13 +174,11 @@ impl SystemState {
     }
 }
 
-/// Starts the logging and error handling.
-///
-/// Can be used by unittests to get more insights.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn start_logging() -> Result<()> {
-    use std::io::stdout;
-
+fn start_logging_with<W>(writer: W) -> Result<()>
+where
+    W: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
+{
     use tracing_subscriber::{Registry, fmt, layer::SubscriberExt};
 
     let filter =
@@ -189,7 +187,7 @@ pub fn start_logging() -> Result<()> {
         .with(
             fmt::layer()
                 .without_time()
-                .with_writer(stdout)
+                .with_writer(writer)
                 .with_filter(filter.clone()),
         )
         .with(EguiLogger {}.with_filter(filter));
@@ -197,6 +195,21 @@ pub fn start_logging() -> Result<()> {
     tracing::subscriber::set_global_default(subscriber).expect("unable to set global subscriber");
 
     Ok(())
+}
+
+/// Starts the logging and error handling.
+///
+/// Can be used by unittests to get more insights.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn start_logging() -> Result<()> {
+    start_logging_with(std::io::stdout)
+}
+
+/// Like [`start_logging`], but writes the console log to stderr so that
+/// command output on stdout stays machine-readable.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn start_logging_to_stderr() -> Result<()> {
+    start_logging_with(std::io::stderr)
 }
 
 /// Starts the logging and error handling.

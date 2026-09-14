@@ -80,6 +80,7 @@ Usage: surfer [OPTIONS] [WAVE_FILE] [COMMAND]
 
 Commands:
   server  starts surfer in headless mode so that a user can connect to it
+  decode  decode a waveform file without opening a window and print the result
   help    Print this message or the help of the given subcommand(s)
 
 Arguments:
@@ -101,3 +102,13 @@ Options:
   -h, --help                         Print help
   -V, --version                      Print version
 ```
+
+### Decoding from the command line
+
+`surfer decode` runs one or more decoders on a waveform without opening a window and prints the decoded rows. Inputs and settings use the same SUCL syntax as the GUI command prompt and `.sucl` files:
+
+``` bash
+surfer decode dump.fst -C "decoder_add spdif adat_core_tb.adat_in_0" --format csv
+```
+
+`--format` selects `text` (the default), `csv`, or `json`. Use `-c/--command-file` (or `--script`) instead of `-C` to read the commands from a file, for example the `.sucl` file next to an example waveform. Logs are written to stderr, so the decoded output on stdout can be piped into other tools.

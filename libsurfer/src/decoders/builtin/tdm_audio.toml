@@ -1,0 +1,132 @@
+id = "tdm_audio"
+name = "TDM Audio"
+engine = "clocked_serial"
+
+[[inputs]]
+role = "bitclk"
+description = "Bit clock"
+
+[[inputs]]
+role = "frame_sync"
+description = "Frame sync / word select"
+
+[[inputs]]
+role = "data"
+description = "Serial data"
+
+[[settings]]
+key = "mode"
+label = "Frame sync mode"
+type = "enum"
+default = "pulse"
+options = [
+    { value = "pulse", label = "Pulse (TDM)" },
+    { value = "level", label = "Level (I2S)" },
+]
+
+[[settings]]
+key = "justification"
+label = "Justification"
+type = "enum"
+default = "left"
+options = [
+    { value = "left", label = "Left" },
+    { value = "right", label = "Right" },
+]
+
+[[settings]]
+key = "edge"
+label = "Bit clock edge"
+type = "enum"
+default = "rising"
+options = [
+    { value = "rising", label = "Rising" },
+    { value = "falling", label = "Falling" },
+]
+
+[[settings]]
+key = "fs_edge"
+label = "Frame sync edge"
+type = "enum"
+default = "rising"
+options = [
+    { value = "rising", label = "Rising" },
+    { value = "falling", label = "Falling" },
+]
+
+[[settings]]
+key = "active_high"
+label = "Frame sync active level"
+type = "bool"
+default = true
+
+[[settings]]
+key = "bits"
+label = "Bits per sample"
+type = "integer"
+default = 16
+min = 1
+max = 64
+
+[[settings]]
+key = "channels"
+label = "Channels"
+type = "integer"
+default = 2
+min = 1
+max = 64
+
+[[settings]]
+key = "slot_width"
+label = "Slot width"
+type = "integer"
+default = 0
+min = 0
+max = 64
+
+[[settings]]
+key = "offset"
+label = "Data offset"
+type = "integer"
+default = 0
+min = 0
+max = 64
+
+[[settings]]
+key = "signed"
+label = "Signed"
+type = "bool"
+default = true
+
+[[settings]]
+key = "show_errors"
+label = "Show errors"
+type = "bool"
+default = true
+
+[[settings]]
+key = "order"
+label = "Bit order"
+type = "enum"
+default = "msb"
+options = [
+    { value = "msb", label = "MSB first" },
+    { value = "lsb", label = "LSB first" },
+]
+
+[engine_params]
+clock = "bitclk"
+clock_edge = "$edge"
+data = "data"
+frame = "frame_sync"
+frame_mode = "$mode"
+frame_edge = "$fs_edge"
+frame_active_high = "$active_high"
+bits = "$bits"
+channels = "$channels"
+bit_order = "$order"
+justification = "$justification"
+offset = "$offset"
+signed = "$signed"
+show_errors = "$show_errors"
+slot_width = "$slot_width"

@@ -1,0 +1,71 @@
+id = "spdif"
+name = "S/PDIF / AES3"
+engine = "biphase_audio"
+
+[[inputs]]
+role = "data"
+description = "Biphase-mark-coded line signal"
+
+[[inputs]]
+role = "bitclk"
+description = "Bit clock"
+required = false
+
+[[settings]]
+key = "word_bits"
+label = "Word length"
+type = "enum"
+default = "auto"
+options = [
+    { value = "auto", label = "Auto" },
+    { value = "16", label = "16-bit" },
+    { value = "20", label = "20-bit" },
+    { value = "24", label = "24-bit" },
+]
+
+[[settings]]
+key = "signed"
+label = "Signed"
+type = "bool"
+default = true
+
+[[settings]]
+key = "show_validity"
+label = "Show validity"
+type = "bool"
+default = false
+
+[[settings]]
+key = "show_user"
+label = "Show user data"
+type = "bool"
+default = false
+
+[[settings]]
+key = "show_status"
+label = "Show channel status"
+type = "bool"
+default = true
+
+[[settings]]
+key = "show_parity_errors"
+label = "Show parity errors"
+type = "bool"
+default = true
+
+[[settings]]
+key = "show_preambles"
+label = "Show preambles"
+type = "bool"
+default = true
+
+[engine_params]
+data = "data"
+bitclk = "bitclk"
+word_bits = "$word_bits"
+signed = "$signed"
+show_validity = "$show_validity"
+show_user = "$show_user"
+show_status = "$show_status"
+show_parity_errors = "$show_parity_errors"
+show_preambles = "$show_preambles"

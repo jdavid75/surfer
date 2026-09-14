@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PARSER = ROOT / "libsurfer" / "src" / "command_parser.rs"
 DOCS = ROOT / "docs" / "commands" / "README.md"
 
+MATCH_QUERY = "match query {"
 TOP_LEVEL_MATCH_ARM_RE = re.compile(r'^ {16}(?:"[a-z0-9_]+"\s*(?:\|\s*)?)+\s*=>')
 COMMAND_RE = re.compile(r'"([a-z0-9_]+)"')
 DOC_CODE_RE = re.compile(r'``([^`]+)``')
@@ -14,10 +15,51 @@ COMMAND_NAME_RE = re.compile(r'^[a-z][a-z0-9_]*$')
 
 
 def extract_parser_commands(text: str) -> set[str]:
+    """Commands in the top-level `match query` arms.
+
+    Only arms at the match's own brace depth are commands; nested `match`
+    statements inside an arm (e.g. parsing a setting value) are not. String
+    literals and line comments are skipped while tracking the depth so that
+    braces in format strings do not confuse the scan.
+    """
+    marker = text.index(MATCH_QUERY) + len(MATCH_QUERY)
     commands: set[str] = set()
-    for line in text.splitlines():
-        if TOP_LEVEL_MATCH_ARM_RE.match(line):
-            commands.update(COMMAND_RE.findall(line))
+    depth = 1
+    line_depth = 1
+    line_start = marker
+    in_string = False
+    index = marker
+
+    while index < len(text):
+        char = text[index]
+        if char == "\n":
+            line = text[line_start:index]
+            if line_depth == 1 and TOP_LEVEL_MATCH_ARM_RE.match(line):
+                commands.update(COMMAND_RE.findall(line))
+            line_start = index + 1
+            line_depth = depth
+        elif in_string:
+            if char == "\\":
+                index += 2
+                continue
+            if char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char == "/" and text[index + 1 : index + 2] == "/":
+            newline = text.find("\n", index)
+            if newline == -1:
+                break
+            index = newline
+            continue
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        index += 1
+
     return commands
 
 

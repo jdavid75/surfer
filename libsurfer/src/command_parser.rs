@@ -6,6 +6,10 @@ use std::{fs, str::FromStr};
 use camino::Utf8PathBuf;
 
 use crate::config::ArrowKeyBindings;
+use crate::decoders::{
+    DecoderInput, DecoderSettings, SettingKind, SettingValue, ValueFormat, all_decoders,
+    decoder_by_id,
+};
 use crate::displayed_item_tree::{Node, VisibleItemIndex};
 use crate::frame_buffer::FrameBufferColorMode;
 use crate::fzcmd::{Command, ParamGreed};
@@ -18,7 +22,7 @@ use crate::wave_source::LoadOptions;
 use crate::{
     SystemState,
     clock_highlighting::ClockHighlightType,
-    displayed_item::{AnalogRenderStyle, AnalogSettings, DisplayedItem},
+    displayed_item::{AnalogRenderStyle, AnalogSettings, AnalogYAxisScale, DisplayedItem},
     message::Message,
     toolbar::toolbar_group_specs,
     util::{alpha_idx_to_uint_idx, uint_idx_to_alpha_idx},
@@ -37,6 +41,150 @@ fn is_wave_file_extension(ext: &str) -> bool {
 /// Match str with command file extensions, currently: sucl
 fn is_command_file_extension(ext: &str) -> bool {
     matches!(ext, "sucl")
+}
+
+fn apply_decoder_setting(
+    decoder: &dyn crate::decoders::SignalDecoder,
+    settings: &mut DecoderSettings,
+    key: &str,
+    value: &str,
+) -> Option<()> {
+    let field = decoder
+        .settings_schema()
+        .fields
+        .iter()
+        .find(|field| field.key == key)?;
+    let parsed = match &field.kind {
+        SettingKind::Bool => SettingValue::Bool(parse_bool(value)?),
+        SettingKind::Integer { .. } => SettingValue::Integer(value.parse().ok()?),
+        SettingKind::Enum { .. } => SettingValue::Enum(value.to_string()),
+    };
+    settings.set(field.key.clone(), parsed);
+    // The dialog validates before applying; the command path must too, so
+    // that e.g. out-of-range `channels` cannot reach `row_count`/`decode`.
+    decoder.validate_settings(settings).ok()?;
+    Some(())
+}
+
+/// The parsed arguments of a `decoder_add` command.
+struct DecoderArgs {
+    inputs: Vec<DecoderInput>,
+    settings: DecoderSettings,
+    show_samples: bool,
+    value_format: ValueFormat,
+    analog: Option<AnalogSettings>,
+}
+
+/// Parse the signal and `key=value` arguments of `decoder_add`.
+///
+/// Schema settings take precedence over the display-option aliases, so a user
+/// schema may declare a setting named `format` or `samples`.
+fn parse_decoder_args(
+    decoder_impl: &dyn crate::decoders::SignalDecoder,
+    rest: &str,
+) -> Option<DecoderArgs> {
+    let specs = decoder_impl.inputs();
+    let mut inputs: Vec<DecoderInput> = Vec::new();
+    let mut positional = 0usize;
+    let mut settings = decoder_impl.default_settings();
+    let mut analog = None;
+    let mut show_samples = true;
+    let mut value_format = ValueFormat::Decimal;
+
+    for token in rest.split_whitespace() {
+        if let Some((key, value)) = token.split_once('=') {
+            let is_schema_setting = decoder_impl
+                .settings_schema()
+                .fields
+                .iter()
+                .any(|field| field.key == key);
+            if is_schema_setting {
+                apply_decoder_setting(decoder_impl, &mut settings, key, value)?;
+            } else if key == "format" || key == "value_format" {
+                value_format = match value {
+                    "dec" | "decimal" => ValueFormat::Decimal,
+                    "hex" | "hexadecimal" => ValueFormat::Hexadecimal,
+                    _ => return None,
+                };
+            } else if key == "samples" || key == "show_samples" {
+                show_samples = match value {
+                    "on" | "true" | "1" => true,
+                    "off" | "false" | "0" => false,
+                    _ => return None,
+                };
+            } else if !apply_decoder_analog_setting(&mut analog, key, value) {
+                return None;
+            }
+        } else {
+            let spec = specs.get(positional)?;
+            inputs.push(DecoderInput {
+                role: spec.role.clone(),
+                variable_ref: VariableRef::from_hierarchy_string(token),
+            });
+            positional += 1;
+        }
+    }
+
+    for spec in specs.iter().filter(|spec| spec.required) {
+        if !inputs.iter().any(|input| input.role == spec.role) {
+            return None;
+        }
+    }
+
+    Some(DecoderArgs {
+        inputs,
+        settings,
+        show_samples,
+        value_format,
+        analog,
+    })
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value {
+        "true" | "1" | "yes" => Some(true),
+        "false" | "0" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+fn apply_decoder_analog_setting(
+    analog: &mut Option<AnalogSettings>,
+    key: &str,
+    value: &str,
+) -> bool {
+    let default = || analog.unwrap_or_else(AnalogSettings::decoder_default);
+    match key {
+        "analog" => {
+            *analog = match value {
+                "step" => Some(AnalogSettings {
+                    render_style: AnalogRenderStyle::Step,
+                    ..default()
+                }),
+                "interpolated" | "interp" => Some(AnalogSettings {
+                    render_style: AnalogRenderStyle::Interpolated,
+                    ..default()
+                }),
+                "off" | "none" => None,
+                _ => return false,
+            };
+            true
+        }
+        "analog_scale" | "y_axis_scale" => {
+            let y_axis_scale = match value {
+                "viewport" => AnalogYAxisScale::Viewport,
+                "global" => AnalogYAxisScale::Global,
+                "type_limits" | "type" => AnalogYAxisScale::TypeLimits,
+                _ => return false,
+            };
+            *analog = Some(AnalogSettings {
+                y_axis_scale,
+                ..default()
+            });
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Split part of a query at whitespace
@@ -290,6 +438,8 @@ pub(crate) fn get_parser(state: &SystemState) -> Command<Message> {
             "item_set_format",
             "item_set_height",
             "item_set_analog",
+            "item_set_samples",
+            "item_set_value_format",
             "item_unset_color",
             "item_unset_background_color",
             "item_unfocus",
@@ -307,6 +457,7 @@ pub(crate) fn get_parser(state: &SystemState) -> Command<Message> {
             "stream_select",
             "stream_select_root",
             "divider_add",
+            "decoder_add",
             "config_reload",
             "theme_select",
             "reload",
@@ -822,6 +973,34 @@ pub(crate) fn get_parser(state: &SystemState) -> Command<Message> {
                         )))
                     }),
                 ),
+                "item_set_samples" => single_word(
+                    vec!["on".to_string(), "off".to_string()],
+                    Box::new(|word| {
+                        let show_samples = match word {
+                            "on" | "true" => true,
+                            "off" | "false" => false,
+                            _ => return None,
+                        };
+                        Some(Command::Terminal(Message::SetDecoderSamples(
+                            MessageTarget::CurrentSelection,
+                            show_samples,
+                        )))
+                    }),
+                ),
+                "item_set_value_format" => single_word(
+                    vec!["decimal".to_string(), "hex".to_string()],
+                    Box::new(|word| {
+                        let format = match word {
+                            "dec" | "decimal" => ValueFormat::Decimal,
+                            "hex" | "hexadecimal" => ValueFormat::Hexadecimal,
+                            _ => return None,
+                        };
+                        Some(Command::Terminal(Message::SetDecoderValueFormat(
+                            MessageTarget::CurrentSelection,
+                            format,
+                        )))
+                    }),
+                ),
                 "item_unset_color" => Some(Command::Terminal(Message::ItemColorChange(
                     MessageTarget::CurrentSelection,
                     None,
@@ -960,6 +1139,28 @@ pub(crate) fn get_parser(state: &SystemState) -> Command<Message> {
                         )))
                     }),
                 ),
+                "decoder_add" => Some(Command::NonTerminal(
+                    ParamGreed::Word,
+                    all_decoders().iter().map(|d| d.id().to_string()).collect(),
+                    Box::new(|decoder, _| {
+                        let decoder = decoder.to_string();
+                        single_word(
+                            vec![],
+                            Box::new(move |rest| {
+                                let decoder_impl = decoder_by_id(&decoder)?;
+                                let args = parse_decoder_args(&*decoder_impl, rest)?;
+                                Some(Command::Terminal(Message::AddDecoder {
+                                    decoder: decoder.clone(),
+                                    inputs: args.inputs,
+                                    settings: args.settings,
+                                    show_samples: args.show_samples,
+                                    value_format: args.value_format,
+                                    analog: args.analog,
+                                }))
+                            }),
+                        )
+                    }),
+                )),
                 "timeline_add" => Some(Command::Terminal(Message::AddTimeLine(None))),
                 "goto_cursor" => Some(Command::Terminal(Message::GoToCursorIfNotInView)),
                 "goto_marker" => single_word(
@@ -1268,4 +1469,355 @@ pub(crate) fn get_parser(state: &SystemState) -> Command<Message> {
             }
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::StartupParams;
+    use crate::fzcmd::{expand_command, parse_command};
+
+    /// Default settings for the bundled TDM decoder with overrides.
+    fn tdm_settings(values: &[(&str, SettingValue)]) -> DecoderSettings {
+        let decoder =
+            crate::decoders::decoder_by_id("tdm_audio").expect("bundled tdm_audio decoder");
+        let mut settings = decoder.default_settings();
+        for (key, value) in values {
+            settings.set((*key).to_string(), value.clone());
+        }
+        settings
+    }
+
+    /// A decoder whose schema declares a setting named `format`, to check that
+    /// schema settings win over the `format` display-option alias.
+    struct FormatSettingDecoder;
+
+    static FORMAT_SETTING_SCHEMA: std::sync::LazyLock<crate::decoders::SettingsSchema> =
+        std::sync::LazyLock::new(|| crate::decoders::SettingsSchema {
+            fields: vec![crate::decoders::SettingField {
+                key: "format".to_string(),
+                label: "Format".to_string(),
+                default: SettingValue::Enum("dec".to_string()),
+                kind: crate::decoders::SettingKind::Enum {
+                    options: vec![
+                        crate::decoders::SettingOption {
+                            value: "dec".to_string(),
+                            label: "Dec".to_string(),
+                        },
+                        crate::decoders::SettingOption {
+                            value: "hex".to_string(),
+                            label: "Hex".to_string(),
+                        },
+                    ],
+                },
+            }],
+        });
+
+    impl crate::decoders::SignalDecoder for FormatSettingDecoder {
+        fn id(&self) -> &str {
+            "format_setting"
+        }
+
+        fn display_name(&self) -> &str {
+            "Format setting"
+        }
+
+        fn inputs(&self) -> &[crate::decoders::InputSpec] {
+            &[]
+        }
+
+        fn settings_schema(&self) -> &crate::decoders::SettingsSchema {
+            &FORMAT_SETTING_SCHEMA
+        }
+
+        fn validate_settings(&self, _settings: &DecoderSettings) -> eyre::Result<()> {
+            Ok(())
+        }
+
+        fn row_count(&self, _inputs: &[DecoderInput], _settings: &DecoderSettings) -> usize {
+            1
+        }
+
+        fn decode(
+            &self,
+            _ctx: &crate::decoders::DecoderContext<'_>,
+        ) -> eyre::Result<crate::decoders::DecodedData> {
+            Ok(crate::decoders::DecodedData { rows: Vec::new() })
+        }
+    }
+
+    #[test]
+    fn decoder_add_prefers_schema_settings_over_display_aliases() {
+        let args = parse_decoder_args(&FormatSettingDecoder, "format=hex").expect("parsed");
+        assert_eq!(args.settings.get_enum("format", ""), "hex");
+        assert_eq!(args.value_format, ValueFormat::Decimal);
+
+        // Without a matching schema setting, the display alias still applies.
+        let args = parse_decoder_args(&FormatSettingDecoder, "value_format=hex").expect("parsed");
+        assert_eq!(args.value_format, ValueFormat::Hexadecimal);
+        assert!(args.settings.get("value_format").is_none());
+    }
+
+    #[test]
+    fn parses_decoder_add_command() {
+        let state = SystemState::new_default_config()
+            .unwrap()
+            .with_params(StartupParams::default());
+
+        let result = parse_command(
+            "decoder_add tdm_audio tb.bitclk tb.frame_sync tb.data channels=2 bits=16",
+            get_parser(&state),
+        );
+        assert!(matches!(result, Ok(Message::AddDecoder { .. })));
+
+        let result = parse_command(
+            "decoder_add tdm_audio tb.bitclk tb.frame_sync tb.data samples=off analog=interpolated analog_scale=global",
+            get_parser(&state),
+        );
+        match result {
+            Ok(Message::AddDecoder {
+                show_samples,
+                analog,
+                ..
+            }) => {
+                assert!(!show_samples);
+                let analog = analog.expect("analog settings");
+                assert_eq!(analog.render_style, AnalogRenderStyle::Interpolated);
+                assert_eq!(analog.y_axis_scale, AnalogYAxisScale::Global);
+            }
+            other => panic!("unexpected parse result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_out_of_range_decoder_settings() {
+        let state = SystemState::new_default_config()
+            .unwrap()
+            .with_params(StartupParams::default());
+
+        for command in [
+            "decoder_add tdm_audio tb.bitclk tb.frame_sync tb.data channels=2000000000",
+            "decoder_add tdm_audio tb.bitclk tb.frame_sync tb.data offset=4294967295",
+            "decoder_add tdm_audio tb.bitclk tb.frame_sync tb.data bits=0",
+            "decoder_add tdm_audio tb.bitclk tb.frame_sync tb.data justification=diagonal",
+        ] {
+            let result = parse_command(command, get_parser(&state));
+            assert!(
+                result.is_err(),
+                "expected '{command}' to be rejected, got {result:?}"
+            );
+        }
+
+        let result = parse_command(
+            "decoder_add tdm_audio tb.bitclk tb.frame_sync tb.data channels=2 bits=16",
+            get_parser(&state),
+        );
+        assert!(matches!(result, Ok(Message::AddDecoder { .. })));
+    }
+
+    #[test]
+    fn expands_decoder_add_command() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        std::thread::spawn(move || {
+            runtime.block_on(async {
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+                }
+            });
+        });
+
+        let root = project_root::get_project_root().unwrap();
+        let mut state = SystemState::new_default_config()
+            .unwrap()
+            .with_params(StartupParams {
+                waves: Some(crate::WaveSource::File(
+                    root.join("examples/tdm_audio.vcd").try_into().unwrap(),
+                )),
+                ..Default::default()
+            });
+
+        let start = std::time::Instant::now();
+        loop {
+            state.handle_async_messages();
+            state.handle_batch_commands();
+            if state.waves_fully_loaded() {
+                break;
+            }
+            if start.elapsed().as_secs() > 10 {
+                panic!("Timeout loading test waveform");
+            }
+        }
+
+        let expanded = expand_command(
+            "decoder_add tdm_audio tb.bitclk tb.frame_sync tb.data",
+            get_parser(&state),
+        );
+        assert_eq!(
+            expanded.expanded,
+            "decoder_add tdm_audio tb.bitclk tb.frame_sync tb.data"
+        );
+    }
+
+    #[test]
+    fn updates_decoder_settings() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        std::thread::spawn(move || {
+            runtime.block_on(async {
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+                }
+            });
+        });
+
+        let root = project_root::get_project_root().unwrap();
+        let mut state = SystemState::new_default_config()
+            .unwrap()
+            .with_params(StartupParams {
+                waves: Some(crate::WaveSource::File(
+                    root.join("examples/tdm_audio.vcd").try_into().unwrap(),
+                )),
+                ..Default::default()
+            });
+
+        let start = std::time::Instant::now();
+        loop {
+            state.handle_async_messages();
+            state.handle_batch_commands();
+            if state.waves_fully_loaded() {
+                break;
+            }
+            if start.elapsed().as_secs() > 10 {
+                panic!("Timeout loading test waveform");
+            }
+        }
+
+        let inputs = ["bitclk", "frame_sync", "data"]
+            .iter()
+            .map(|role| DecoderInput {
+                role: (*role).to_string(),
+                variable_ref: VariableRef::from_hierarchy_string(&format!("tb.{role}")),
+            })
+            .collect::<Vec<_>>();
+
+        state.update(Message::AddDecoder {
+            decoder: "tdm_audio".to_string(),
+            inputs: inputs.clone(),
+            settings: tdm_settings(&[]),
+            show_samples: true,
+            value_format: ValueFormat::Decimal,
+            analog: None,
+        });
+
+        let item_ref = *state
+            .user
+            .waves
+            .as_ref()
+            .expect("waves")
+            .displayed_items
+            .iter()
+            .find_map(|(id, item)| matches!(item, DisplayedItem::Decoder(_)).then_some(id))
+            .expect("decoder item");
+
+        state.update(Message::UpdateDecoder {
+            item: item_ref,
+            decoder: "tdm_audio".to_string(),
+            inputs,
+            settings: tdm_settings(&[
+                ("channels", SettingValue::Integer(4)),
+                ("bits", SettingValue::Integer(24)),
+            ]),
+            show_samples: false,
+            value_format: ValueFormat::Hexadecimal,
+            analog: None,
+        });
+
+        let waves = state.user.waves.as_ref().unwrap();
+        let DisplayedItem::Decoder(decoder) =
+            waves.displayed_items.get(&item_ref).expect("decoder item")
+        else {
+            panic!("expected a decoder item");
+        };
+        assert_eq!(decoder.rows, 5);
+        assert!(!decoder.show_samples);
+        assert_eq!(decoder.value_format, ValueFormat::Hexadecimal);
+        assert!(decoder.cache.is_none());
+        assert_eq!(decoder.settings.get_integer("channels", 0), 4);
+        assert_eq!(decoder.settings.get_integer("bits", 0), 24);
+    }
+
+    #[test]
+    fn decoder_add_from_command_file() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        std::thread::spawn(move || {
+            runtime.block_on(async {
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+                }
+            });
+        });
+
+        let root = project_root::get_project_root().unwrap();
+        let examples_dir = root.join("examples");
+        let mut names = std::fs::read_dir(&examples_dir)
+            .expect("failed to read examples dir")
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().into_string().ok()?;
+                (name.ends_with(".sucl")
+                    && (name.starts_with("tdm_audio")
+                        || name.starts_with("i2s_audio")
+                        || name.starts_with("spdif")))
+                .then_some(name)
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        assert!(!names.is_empty(), "no decoder example command files found");
+
+        for name in names {
+            let stem = name.trim_end_matches(".sucl");
+            let wave = examples_dir.join(format!("{stem}.vcd"));
+            let command_file: Utf8PathBuf = examples_dir.join(&name).try_into().unwrap();
+            let mut state = SystemState::new_default_config()
+                .unwrap()
+                .with_params(StartupParams {
+                    waves: Some(crate::WaveSource::File(
+                        wave.try_into().expect("invalid example path"),
+                    )),
+                    startup_commands: crate::batch_commands::read_command_file(&command_file),
+                    ..Default::default()
+                });
+
+            let start = std::time::Instant::now();
+            loop {
+                state.handle_async_messages();
+                state.handle_batch_commands();
+                let has_decoder = state.user.waves.as_ref().is_some_and(|waves| {
+                    waves
+                        .displayed_items
+                        .values()
+                        .any(|item| matches!(item, DisplayedItem::Decoder(_)))
+                });
+                if has_decoder {
+                    break;
+                }
+                if start.elapsed().as_secs() > 10 {
+                    panic!("Timeout waiting for decoder item from {name}");
+                }
+            }
+        }
+    }
 }

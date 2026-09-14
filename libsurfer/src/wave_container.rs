@@ -751,11 +751,23 @@ impl WaveContainer {
     pub fn supports_analog(&self) -> bool {
         matches!(self, WaveContainer::Wellen(_))
     }
+
+    /// Whether this container supports signal decoders, which require
+    /// `signal_accessor` support.
+    #[must_use]
+    pub fn supports_decoders(&self) -> bool {
+        matches!(self, WaveContainer::Wellen(_))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_container_does_not_support_decoders() {
+        assert!(!WaveContainer::__new_empty().supports_decoders());
+    }
 
     #[test]
     fn extract_index_with_valid_index() {

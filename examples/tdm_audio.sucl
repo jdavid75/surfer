@@ -1,0 +1,6 @@
+# TDM audio decoder demo for examples/tdm_audio.vcd
+# Launch with: surfer examples/tdm_audio.vcd -c examples/tdm_audio.sucl
+variable_add tb.bitclk
+variable_add tb.frame_sync
+variable_add tb.data
+decoder_add tdm_audio tb.bitclk tb.frame_sync tb.data

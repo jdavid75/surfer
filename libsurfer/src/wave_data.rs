@@ -11,9 +11,10 @@ use tracing::{error, info, warn};
 use crate::annotation::{Annotatable, Annotation};
 use crate::annotation_list::AnnotationGroup;
 use crate::data_container::DataContainer;
+use crate::decoders::{DecoderInput, DecoderSettings};
 use crate::displayed_item::{
-    DisplayedDivider, DisplayedFieldRef, DisplayedGroup, DisplayedItem, DisplayedItemRef,
-    DisplayedStream, DisplayedTimeLine, DisplayedVariable,
+    DisplayedDecoder, DisplayedDivider, DisplayedFieldRef, DisplayedGroup, DisplayedItem,
+    DisplayedItemRef, DisplayedStream, DisplayedTimeLine, DisplayedVariable,
 };
 use crate::displayed_item_tree::{DisplayedItemTree, ItemIndex, TargetPosition, VisibleItemIndex};
 use crate::graphics::{Graphic, GraphicId};
@@ -336,10 +337,11 @@ impl WaveData {
     /// Get the underlying wave container to load all signals that are being displayed
     ///
     /// This is needed for wave containers that lazy-load signals.
-    fn load_waves(&mut self) -> Option<LoadSignalsCmd> {
-        let variables = self.displayed_items.values().filter_map(|item| match item {
-            DisplayedItem::Variable(r) => Some(&r.variable_ref),
-            _ => None,
+    pub(crate) fn load_waves(&mut self) -> Option<LoadSignalsCmd> {
+        let variables = self.displayed_items.values().flat_map(|item| match item {
+            DisplayedItem::Variable(r) => vec![&r.variable_ref],
+            DisplayedItem::Decoder(d) => d.inputs.iter().map(|i| &i.variable_ref).collect(),
+            _ => vec![],
         });
         self.inner
             .as_waves_mut()
@@ -390,6 +392,15 @@ impl WaveData {
                     | DisplayedItem::TimeLine(_)
                     | DisplayedItem::Stream(_)
                     | DisplayedItem::Group(_) => Some((id, i.clone())),
+                    DisplayedItem::Decoder(d) => {
+                        let mut d = d.clone();
+                        for input in &mut d.inputs {
+                            if let Some(new_ref) = waves.update_variable_ref(&input.variable_ref) {
+                                input.variable_ref = new_ref;
+                            }
+                        }
+                        Some((id, DisplayedItem::Decoder(d)))
+                    }
                     DisplayedItem::Variable(s) => {
                         s.update(waves, keep_unavailable).map(|r| (id, r))
                     }
@@ -763,6 +774,37 @@ impl WaveData {
         });
 
         self.insert_item(new_stream, None, true);
+    }
+
+    pub fn add_decoder(
+        &mut self,
+        decoder: String,
+        inputs: Vec<DecoderInput>,
+        settings: DecoderSettings,
+        show_samples: bool,
+        value_format: crate::decoders::ValueFormat,
+        analog: Option<crate::displayed_item::AnalogSettings>,
+    ) -> Option<LoadSignalsCmd> {
+        let decoder_impl = crate::decoders::decoder_by_id(&decoder)?;
+        let rows = decoder_impl.row_count(&inputs, &settings);
+        let item = DisplayedItem::Decoder(DisplayedDecoder {
+            display_name: decoder_impl.display_name().to_string(),
+            rows,
+            decoder,
+            inputs,
+            settings,
+            manual_name: None,
+            color: None,
+            background_color: None,
+            show_samples,
+            value_format,
+            analog,
+            height_scaling_factor: None,
+            row_names: Vec::new(),
+            cache: None,
+        });
+        self.insert_item(item, None, true);
+        self.load_waves()
     }
 
     pub fn add_all_streams(&mut self) {

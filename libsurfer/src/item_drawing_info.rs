@@ -43,6 +43,15 @@ pub struct StreamDrawingInfo {
 }
 
 #[derive(Debug)]
+pub struct DecoderDrawingInfo {
+    pub item: crate::displayed_item::DisplayedItemRef,
+    pub rows: usize,
+    pub vidx: VisibleItemIndex,
+    pub top: f32,
+    pub bottom: f32,
+}
+
+#[derive(Debug)]
 pub struct GroupDrawingInfo {
     pub vidx: VisibleItemIndex,
     pub top: f32,
@@ -62,6 +71,7 @@ pub enum ItemDrawingInfo {
     Marker(MarkerDrawingInfo),
     TimeLine(TimeLineDrawingInfo),
     Stream(StreamDrawingInfo),
+    Decoder(DecoderDrawingInfo),
     Group(GroupDrawingInfo),
     Placeholder(PlaceholderDrawingInfo),
 }
@@ -75,6 +85,7 @@ impl ItemDrawingInfo {
             ItemDrawingInfo::Marker(drawing_info) => drawing_info.top,
             ItemDrawingInfo::TimeLine(drawing_info) => drawing_info.top,
             ItemDrawingInfo::Stream(drawing_info) => drawing_info.top,
+            ItemDrawingInfo::Decoder(drawing_info) => drawing_info.top,
             ItemDrawingInfo::Group(drawing_info) => drawing_info.top,
             ItemDrawingInfo::Placeholder(drawing_info) => drawing_info.top,
         }
@@ -87,6 +98,7 @@ impl ItemDrawingInfo {
             ItemDrawingInfo::Marker(drawing_info) => drawing_info.bottom,
             ItemDrawingInfo::TimeLine(drawing_info) => drawing_info.bottom,
             ItemDrawingInfo::Stream(drawing_info) => drawing_info.bottom,
+            ItemDrawingInfo::Decoder(drawing_info) => drawing_info.bottom,
             ItemDrawingInfo::Group(drawing_info) => drawing_info.bottom,
             ItemDrawingInfo::Placeholder(drawing_info) => drawing_info.bottom,
         }
@@ -99,6 +111,7 @@ impl ItemDrawingInfo {
             ItemDrawingInfo::Marker(drawing_info) => drawing_info.vidx,
             ItemDrawingInfo::TimeLine(drawing_info) => drawing_info.vidx,
             ItemDrawingInfo::Stream(drawing_info) => drawing_info.vidx,
+            ItemDrawingInfo::Decoder(drawing_info) => drawing_info.vidx,
             ItemDrawingInfo::Group(drawing_info) => drawing_info.vidx,
             ItemDrawingInfo::Placeholder(drawing_info) => drawing_info.vidx,
         }

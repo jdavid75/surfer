@@ -14,6 +14,7 @@ use crate::translation::DynTranslator;
 use crate::wave_container::VariableMeta;
 
 use crate::config::SurferConfig;
+use crate::decoders::{DecoderCacheEntry, DecoderInput, DecoderSettings, ValueFormat};
 use crate::transaction_container::TransactionStreamRef;
 use crate::wave_container::{FieldRef, VariableRef, VariableRefExt, WaveContainer};
 use crate::{
@@ -66,6 +67,7 @@ pub enum DisplayedItem {
     TimeLine(DisplayedTimeLine),
     Placeholder(DisplayedPlaceholder),
     Stream(DisplayedStream),
+    Decoder(DisplayedDecoder),
     Group(DisplayedGroup),
 }
 
@@ -122,6 +124,16 @@ impl AnalogSettings {
     pub fn downgrade_type_limits(&mut self) {
         if self.y_axis_scale == AnalogYAxisScale::TypeLimits {
             self.y_axis_scale = AnalogYAxisScale::Global;
+        }
+    }
+
+    /// Default analog settings for decoder items. Interpolated by default so that
+    /// consecutive samples are connected instead of showing step jumps.
+    #[must_use]
+    pub fn decoder_default() -> Self {
+        Self {
+            render_style: AnalogRenderStyle::Interpolated,
+            ..Self::default()
         }
     }
 }
@@ -386,6 +398,84 @@ impl DisplayedStream {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct DisplayedDecoder {
+    pub decoder: String,
+    pub inputs: Vec<DecoderInput>,
+    pub settings: DecoderSettings,
+    pub display_name: String,
+    pub manual_name: Option<String>,
+    pub color: Option<String>,
+    pub background_color: Option<String>,
+    pub rows: usize,
+    #[serde(default = "default_show_samples")]
+    pub show_samples: bool,
+    #[serde(default, alias = "sample_format")]
+    pub value_format: ValueFormat,
+    pub analog: Option<AnalogSettings>,
+    #[serde(default)]
+    pub height_scaling_factor: Option<f32>,
+    /// Row names from the last decode, used for the name column.
+    #[serde(skip)]
+    pub row_names: Vec<String>,
+    #[serde(skip)]
+    pub cache: Option<Arc<DecoderCacheEntry>>,
+}
+
+impl Clone for DisplayedDecoder {
+    fn clone(&self) -> Self {
+        Self {
+            decoder: self.decoder.clone(),
+            inputs: self.inputs.clone(),
+            settings: self.settings.clone(),
+            display_name: self.display_name.clone(),
+            manual_name: self.manual_name.clone(),
+            color: self.color.clone(),
+            background_color: self.background_color.clone(),
+            rows: self.rows,
+            show_samples: self.show_samples,
+            value_format: self.value_format,
+            analog: self.analog,
+            height_scaling_factor: self.height_scaling_factor,
+            row_names: self.row_names.clone(),
+            cache: None,
+        }
+    }
+}
+
+fn default_show_samples() -> bool {
+    true
+}
+
+impl DisplayedDecoder {
+    #[must_use]
+    pub fn channel_name(&self, row: usize) -> String {
+        self.row_names
+            .get(row)
+            .cloned()
+            .unwrap_or_else(|| format!("ch{row}"))
+    }
+
+    pub fn rich_text(
+        &self,
+        text_color: Color32,
+        style: &Style,
+        layout_job: &mut LayoutJob,
+        line_height: f32,
+    ) {
+        let name = self.manual_name.as_ref().unwrap_or(&self.display_name);
+        let mut text = name.clone();
+        for row in 0..self.rows {
+            text.push('\n');
+            text.push_str(&self.channel_name(row));
+        }
+        RichText::new(text)
+            .color(text_color)
+            .line_height(Some(line_height))
+            .append_to(layout_job, style, FontSelection::Default, Align::Center);
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct DisplayedGroup {
     pub name: String,
@@ -413,6 +503,7 @@ impl DisplayedItem {
             DisplayedItem::TimeLine(timeline) => timeline.color.as_deref(),
             DisplayedItem::Placeholder(_) => None,
             DisplayedItem::Stream(stream) => stream.color.as_deref(),
+            DisplayedItem::Decoder(decoder) => decoder.color.as_deref(),
             DisplayedItem::Group(group) => group.color.as_deref(),
         }
     }
@@ -425,6 +516,7 @@ impl DisplayedItem {
             DisplayedItem::TimeLine(timeline) => timeline.color.clone_from(color_name),
             DisplayedItem::Placeholder(placeholder) => placeholder.color.clone_from(color_name),
             DisplayedItem::Stream(stream) => stream.color.clone_from(color_name),
+            DisplayedItem::Decoder(decoder) => decoder.color.clone_from(color_name),
             DisplayedItem::Group(group) => group.color.clone_from(color_name),
         }
     }
@@ -457,6 +549,11 @@ impl DisplayedItem {
                 .manual_name
                 .as_ref()
                 .unwrap_or(&stream.display_name)
+                .clone(),
+            DisplayedItem::Decoder(decoder) => decoder
+                .manual_name
+                .as_ref()
+                .unwrap_or(&decoder.display_name)
                 .clone(),
             DisplayedItem::Group(group) => group.name.clone(),
         }
@@ -509,6 +606,14 @@ impl DisplayedItem {
                     .line_height(Some(config.layout.transactions_line_height))
                     .append_to(layout_job, style, FontSelection::Default, Align::Center);
             }
+            DisplayedItem::Decoder(decoder) => {
+                decoder.rich_text(
+                    color,
+                    style,
+                    layout_job,
+                    config.layout.waveforms_line_height + 2.0 * config.layout.waveforms_gap,
+                );
+            }
             DisplayedItem::Group(group) => {
                 group.rich_text(color, style, layout_job);
             }
@@ -535,6 +640,9 @@ impl DisplayedItem {
             DisplayedItem::Stream(stream) => {
                 stream.manual_name = name;
             }
+            DisplayedItem::Decoder(decoder) => {
+                decoder.manual_name = name;
+            }
             DisplayedItem::Group(group) => {
                 group.name = name.unwrap_or_default();
             }
@@ -547,6 +655,7 @@ impl DisplayedItem {
             DisplayedItem::Variable(variable) => variable.manual_name.is_some(),
             DisplayedItem::Placeholder(placeholder) => placeholder.manual_name.is_some(),
             DisplayedItem::Stream(stream) => stream.manual_name.is_some(),
+            DisplayedItem::Decoder(decoder) => decoder.manual_name.is_some(),
             DisplayedItem::Divider(_)
             | DisplayedItem::Marker(_)
             | DisplayedItem::TimeLine(_)
@@ -563,6 +672,7 @@ impl DisplayedItem {
             DisplayedItem::TimeLine(timeline) => timeline.background_color.as_deref(),
             DisplayedItem::Placeholder(_) => None,
             DisplayedItem::Stream(stream) => stream.background_color.as_deref(),
+            DisplayedItem::Decoder(decoder) => decoder.background_color.as_deref(),
             DisplayedItem::Group(group) => group.background_color.as_deref(),
         }
     }
@@ -587,6 +697,9 @@ impl DisplayedItem {
             DisplayedItem::Stream(stream) => {
                 stream.background_color.clone_from(color_name);
             }
+            DisplayedItem::Decoder(decoder) => {
+                decoder.background_color.clone_from(color_name);
+            }
             DisplayedItem::Group(group) => {
                 group.background_color.clone_from(color_name);
             }
@@ -598,6 +711,7 @@ impl DisplayedItem {
         match self {
             DisplayedItem::Variable(variable) => variable.height_scaling_factor,
             DisplayedItem::Placeholder(placeholder) => placeholder.height_scaling_factor,
+            DisplayedItem::Decoder(decoder) => decoder.height_scaling_factor,
             _ => None,
         }
         .unwrap_or(1.0)
@@ -609,6 +723,7 @@ impl DisplayedItem {
             DisplayedItem::Placeholder(placeholder) => {
                 placeholder.height_scaling_factor = Some(scale);
             }
+            DisplayedItem::Decoder(decoder) => decoder.height_scaling_factor = Some(scale),
             _ => {}
         }
     }

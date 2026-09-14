@@ -19,6 +19,13 @@ mod main_impl {
     };
     use tracing::error;
 
+    #[derive(Clone, Copy, clap::ValueEnum)]
+    enum OutputFormat {
+        Text,
+        Csv,
+        Json,
+    }
+
     #[derive(clap::Subcommand)]
     enum Commands {
         #[cfg(not(target_arch = "wasm32"))]
@@ -36,6 +43,31 @@ mod main_impl {
             /// waveform file that we want to serve
             #[arg(long)]
             file: String,
+        },
+        /// decode a waveform file without opening a window and print the result
+        Decode {
+            /// Waveform file in VCD, FST, or GHW format.
+            file: String,
+            /// Path to a file containing SUCL commands to run after a waveform has been loaded.
+            /// The commands are the same as those used in the command line interface inside the program.
+            /// Commands are separated by lines or ;. Empty lines are ignored. Line comments starting with
+            /// `#` are supported
+            #[clap(long, short, verbatim_doc_comment)]
+            command_file: Option<Utf8PathBuf>,
+            /// Alias for --`command_file` to let `VUnit` use the same argument for both Surfer and GTKWave.
+            #[clap(long)]
+            script: Option<Utf8PathBuf>,
+            /// SUCL commands to run after the waveform has been loaded, given directly on the
+            /// command line instead of via --command-file. Multiple commands are
+            /// separated by ;.
+            #[clap(long = "command", short = 'C', verbatim_doc_comment)]
+            command_string: Option<String>,
+            /// Output format.
+            #[clap(long, value_enum, default_value_t = OutputFormat::Text)]
+            format: OutputFormat,
+            /// Abort if loading and decoding take longer than this many seconds.
+            #[clap(long, default_value_t = 60)]
+            timeout: u64,
         },
     }
 
@@ -86,6 +118,124 @@ mod main_impl {
         }
     }
 
+    /// Commands for `surfer decode`: the inline `--command` string followed by
+    /// the contents of the command file. Passing both `--command-file` and its
+    /// `--script` alias is rejected rather than silently ignored.
+    fn decode_commands(
+        command_string: Option<String>,
+        command_file: Option<&Utf8PathBuf>,
+        script: Option<&Utf8PathBuf>,
+    ) -> Result<Vec<String>> {
+        let mut commands = Vec::new();
+        if let Some(command_string) = command_string {
+            commands.push(command_string);
+        }
+        match (command_file, script) {
+            (Some(_), Some(_)) => {
+                eyre::bail!("At most one of --command-file and --script can be used");
+            }
+            (Some(path), None) | (None, Some(path)) => {
+                commands.extend(read_command_file(path));
+            }
+            (None, None) => {}
+        }
+        Ok(commands)
+    }
+
+    fn print_decoded(
+        outputs: &[libsurfer::headless::DecodedDecoder],
+        format: OutputFormat,
+    ) -> Result<()> {
+        use std::io::Write as _;
+
+        let stdout = std::io::stdout();
+        let mut out = std::io::BufWriter::new(stdout.lock());
+
+        match format {
+            OutputFormat::Text => {
+                for output in outputs {
+                    writeln!(out, "decoder {} ({})", output.display_name, output.decoder)?;
+                    for row in &output.data.rows {
+                        writeln!(out, "  row {}", row.name)?;
+                        for item in &row.items {
+                            writeln!(
+                                out,
+                                "    [{} .. {}] {}",
+                                item.start,
+                                item.end,
+                                item.value.format(output.value_format)
+                            )?;
+                        }
+                    }
+                }
+            }
+            OutputFormat::Csv => {
+                writeln!(out, "decoder,name,row,start,end,value")?;
+                for output in outputs {
+                    for row in &output.data.rows {
+                        for item in &row.items {
+                            writeln!(
+                                out,
+                                "{},{},{},{},{},{}",
+                                csv_field(&output.decoder),
+                                csv_field(&output.display_name),
+                                csv_field(&row.name),
+                                item.start,
+                                item.end,
+                                csv_field(&item.value.format(output.value_format)),
+                            )?;
+                        }
+                    }
+                }
+            }
+            OutputFormat::Json => {
+                let decoders = outputs
+                    .iter()
+                    .map(|output| {
+                        serde_json::json!({
+                            "decoder": output.decoder,
+                            "name": output.display_name,
+                            "rows": output.data.rows.iter().map(|row| {
+                                serde_json::json!({
+                                    "name": row.name,
+                                    "items": row.items.iter().map(|item| {
+                                        serde_json::json!({
+                                            "start": item.start.to_string(),
+                                            "end": item.end.to_string(),
+                                            "value": item.value.format(output.value_format),
+                                        })
+                                    }).collect::<Vec<_>>(),
+                                })
+                            }).collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                writeln!(out, "{}", serde_json::to_string_pretty(&decoders)?)?;
+            }
+        }
+        out.flush()?;
+        Ok(())
+    }
+
+    /// True if the error is a broken pipe, which is a normal way for a CLI
+    /// tool to be terminated (e.g. `surfer decode … | head`).
+    fn is_broken_pipe(error: &eyre::Report) -> bool {
+        error.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+        })
+    }
+
+    /// Quote a CSV field if it contains a delimiter, quote, or newline.
+    fn csv_field(value: &str) -> String {
+        if value.contains([',', '"', '\n', '\r']) {
+            format!("\"{}\"", value.replace('"', "\"\""))
+        } else {
+            value.to_string()
+        }
+    }
+
     #[allow(dead_code)] // NOTE: Only used in desktop version
     fn startup_params_from_args(args: Args) -> StartupParams {
         let mut startup_commands = Vec::new();
@@ -112,7 +262,15 @@ mod main_impl {
         use libsurfer::translation::wasm_translator::discover_wasm_translators;
         simple_eyre::install()?;
 
-        logs::start_logging()?;
+        // parse arguments
+        let args = Args::parse();
+
+        // Keep stdout machine-readable for `decode`; the GUI logs to stdout.
+        if matches!(&args.command, Some(Commands::Decode { .. })) {
+            logs::start_logging_to_stderr()?;
+        } else {
+            logs::start_logging()?;
+        }
 
         std::panic::set_hook(Box::new(panic_handler));
 
@@ -125,9 +283,6 @@ mod main_impl {
             .enable_all()
             .build()
             .unwrap();
-
-        // parse arguments
-        let args = Args::parse();
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(Commands::Server {
             port,
@@ -144,6 +299,39 @@ mod main_impl {
 
             let res = runtime.block_on(surver::surver_main(port, bind_addr, token, &[file], None));
             return res;
+        }
+
+        if let Some(Commands::Decode {
+            file,
+            command_file,
+            script,
+            command_string,
+            format,
+            timeout,
+        }) = args.command
+        {
+            let commands = decode_commands(command_string, command_file.as_ref(), script.as_ref())?;
+
+            let _enter = runtime.enter();
+            std::thread::spawn(move || {
+                runtime.block_on(async {
+                    loop {
+                        tokio::time::sleep(tokio::time::Duration::from_hours(1)).await;
+                    }
+                });
+            });
+
+            let outputs = libsurfer::headless::decode_file(
+                string_to_wavesource(&file),
+                commands,
+                std::time::Duration::from_secs(timeout),
+            )?;
+            if let Err(error) = print_decoded(&outputs, format)
+                && !is_broken_pipe(&error)
+            {
+                return Err(error);
+            }
+            return Ok(());
         }
 
         let _enter = runtime.enter();
@@ -326,6 +514,33 @@ mod main_impl {
                 "C:/tmp/scr.sucl",
             ]);
             assert!(args.command_file().is_none());
+        }
+
+        #[test]
+        fn decode_commands_rejects_command_file_and_script() {
+            let file = Utf8PathBuf::from("cmds.sucl");
+            let error = decode_commands(None, Some(&file), Some(&file))
+                .expect_err("both aliases should be rejected");
+            assert!(error.to_string().contains("At most one"), "{error}");
+        }
+
+        #[test]
+        fn decode_commands_puts_inline_commands_first() {
+            let path = std::env::temp_dir().join("surfer_decode_commands_test.sucl");
+            std::fs::write(&path, "variable_add tb.data\n").expect("write temp command file");
+            let path = Utf8PathBuf::from_path_buf(path).expect("utf-8 temp path");
+
+            let commands = decode_commands(
+                Some("decoder_add spdif tb.data".to_string()),
+                Some(&path),
+                None,
+            )
+            .expect("commands");
+
+            assert_eq!(commands.len(), 2);
+            assert_eq!(commands[0], "decoder_add spdif tb.data");
+            assert_eq!(commands[1], "variable_add tb.data");
+            std::fs::remove_file(&path).ok();
         }
     }
 }

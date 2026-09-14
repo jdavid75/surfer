@@ -79,6 +79,10 @@ Not all commands are available unless a file is loaded. Also, some commands are 
 
   Add a timeline row.
 
+* ``decoder_add <DECODER> <INPUT>... [SETTING=VALUE]...``
+
+  Add a decoder to the waveform. Positional arguments after the decoder name are assigned to its inputs in the order the decoder declares them; optional inputs may be omitted. Settings are given as ``key=value``, and the display can be controlled with ``samples=on|off``, ``format=dec|hex`` and ``analog=off|step|interpolated``. For example ``decoder_add spdif tb.data`` or ``decoder_add tdm_audio tb.bitclk tb.frame_sync tb.data channels=2 bits=16``. See [Signal decoders](../plugins/signal_decoders.md) for the available decoders, their inputs, and their settings.
+
 ## Groups
 
 * ``group_marked [NAME]``
@@ -146,6 +150,14 @@ Not all commands are available unless a file is loaded. Also, some commands are 
 * ``item_set_analog off | step | interpolated``
 
   Set the analog display mode of the currently focused item.
+
+* ``item_set_samples on | off``
+
+  Show or hide the sample values of the currently focused decoder item.
+
+* ``item_set_value_format decimal | hex``
+
+  Set the sample value format of the currently focused decoder item.
 
 * ``theme_select <THEME_NAME>``
 

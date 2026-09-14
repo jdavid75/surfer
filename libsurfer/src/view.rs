@@ -1,11 +1,14 @@
 use crate::{
     config::{FocusHighlight, ThemeColorPair, TransitionValue},
-    dialog::{draw_open_sibling_state_file_dialog, draw_reload_waveform_dialog},
+    dialog::{
+        draw_decoder_dialog, draw_open_sibling_state_file_dialog, draw_reload_waveform_dialog,
+    },
     displayed_item::DisplayedVariable,
     fzcmd::expand_command,
     item_drawing_info::{
-        DividerDrawingInfo, GroupDrawingInfo, ItemDrawingInfo, MarkerDrawingInfo,
-        PlaceholderDrawingInfo, StreamDrawingInfo, TimeLineDrawingInfo, VariableDrawingInfo,
+        DecoderDrawingInfo, DividerDrawingInfo, GroupDrawingInfo, ItemDrawingInfo,
+        MarkerDrawingInfo, PlaceholderDrawingInfo, StreamDrawingInfo, TimeLineDrawingInfo,
+        VariableDrawingInfo,
     },
     menus::generic_context_menu,
     time::TimeFormatter,
@@ -252,6 +255,12 @@ impl SystemState {
 
         if let Some(dialog) = self.user.show_open_sibling_state_file_suggestion {
             draw_open_sibling_state_file_dialog(ui, dialog, &mut msgs);
+        }
+
+        if let Some(dialog) = self.decoder_dialog.as_mut()
+            && let Some(waves) = self.user.waves.as_ref()
+        {
+            draw_decoder_dialog(ui.ctx(), dialog, waves, &mut msgs);
         }
 
         if self.user.show_performance {
@@ -641,6 +650,11 @@ impl SystemState {
             DisplayedItem::Stream(stream) => {
                 self.user.config.layout.transactions_line_height * stream.rows as f32
             }
+            DisplayedItem::Decoder(decoder) => {
+                base_row_height
+                    * (decoder.rows as f32 + 1.0)
+                    * displayed_item.height_scaling_factor()
+            }
             DisplayedItem::Divider(_)
             | DisplayedItem::Marker(_)
             | DisplayedItem::TimeLine(_)
@@ -834,6 +848,16 @@ impl SystemState {
                     }));
                     y += row_height;
                 }
+                DisplayedItem::Decoder(decoder) => {
+                    out.push(ItemDrawingInfo::Decoder(DecoderDrawingInfo {
+                        item: item_ref,
+                        rows: decoder.rows,
+                        vidx,
+                        top: y,
+                        bottom: y + row_height,
+                    }));
+                    y += row_height;
+                }
                 DisplayedItem::Group(_) => {
                     out.push(ItemDrawingInfo::Group(GroupDrawingInfo {
                         vidx,
@@ -877,6 +901,9 @@ impl SystemState {
                 }
                 Some(DisplayedItem::Stream(s)) => {
                     s.rows.hash(&mut hasher);
+                }
+                Some(DisplayedItem::Decoder(d)) => {
+                    d.rows.hash(&mut hasher);
                 }
                 _ => {}
             }
@@ -1128,6 +1155,7 @@ impl SystemState {
                         | DisplayedItem::Placeholder(_)
                         | DisplayedItem::TimeLine(_)
                         | DisplayedItem::Stream(_)
+                        | DisplayedItem::Decoder(_)
                         | DisplayedItem::Group(_) => {
                             row_ui.with_layout(
                                 row_ui
@@ -1655,7 +1683,11 @@ impl SystemState {
         ui: &mut Ui,
         background_color: Color32,
     ) {
-        let wave_top_padding = self.user.config.layout.waveforms_gap;
+        let wave_top_padding = if matches!(displayed_item, DisplayedItem::Decoder(_)) {
+            0.0
+        } else {
+            self.user.config.layout.waveforms_gap
+        };
         let row = ui.allocate_ui_with_layout(
             ui.available_size(),
             Layout::top_down(self.get_name_alignment()).with_cross_justify(true),
@@ -1836,6 +1868,7 @@ impl SystemState {
                     ItemDrawingInfo::Divider(_)
                     | ItemDrawingInfo::TimeLine(_)
                     | ItemDrawingInfo::Stream(_)
+                    | ItemDrawingInfo::Decoder(_)
                     | ItemDrawingInfo::Group(_)
                     | ItemDrawingInfo::Placeholder(_) => {
                         ui.label("");
