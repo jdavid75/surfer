@@ -2227,7 +2227,7 @@ mod tests {
     fn parses_professional_channel_status() {
         let mut status = [0u8; 24];
         status[0] = 0x01 | (0b10 << 6); // professional, 48 kHz
-        status[2] = 0b001 | (0b101 << 3); // 24-bit range, 24-bit word length
+        status[2] = 0x2C; // 24-bit range (bit 2), 24-bit word (bits 3 and 5)
         status[23] = channel_status_crc(&status);
 
         let mut level = 0u8;
@@ -2246,7 +2246,7 @@ mod tests {
     fn flags_status_crc_errors() {
         let mut status = [0u8; 24];
         status[0] = 0x01 | (0b10 << 6);
-        status[2] = 0b001 | (0b101 << 3);
+        status[2] = 0x2C; // 24-bit range, 24-bit word
         status[23] = channel_status_crc(&status) ^ 0x01;
 
         let mut level = 0u8;
@@ -2273,7 +2273,7 @@ mod tests {
         ] {
             let mut status = [0u8; 24];
             status[0] = 0x01; // professional, rate not indicated in byte 0
-            status[2] = 0b001 | (0b101 << 3);
+            status[2] = 0x2C; // 24-bit range, 24-bit word
             status[4] = code << 3;
             status[23] = channel_status_crc(&status);
 
@@ -2409,5 +2409,282 @@ mod tests {
         assert_eq!(decoded.rows.len(), 4); // A, B, errors, preamble
         assert_eq!(decoded.rows[2].name, "errors");
         assert_eq!(decoded.rows[3].name, "preamble");
+    }
+
+    /// Tests transcribed from EBU Tech 3250 (`docs/development/tech3250.pdf`).
+    ///
+    /// These deliberately avoid the encoder helpers' tables: the expected
+    /// values are the specification's, so a wrong reading in the
+    /// implementation (or in the helpers) fails here. See
+    /// `docs/development/spdif-spec-test-deficiencies.md` for the gaps this
+    /// module covers.
+    mod spec_3250 {
+        use super::*;
+
+        /// A professional channel-status block with the given bytes set.
+        fn professional_status(bytes: &[(usize, u8)]) -> [u8; 24] {
+            let mut status = [0u8; 24];
+            status[0] = 0x01; // professional
+            for (index, value) in bytes {
+                status[*index] = *value;
+            }
+            status
+        }
+
+        fn with_crc(mut status: [u8; 24]) -> [u8; 24] {
+            status[23] = channel_status_crc(&status);
+            status
+        }
+
+        #[test]
+        fn byte2_word_length_table() {
+            // Tech 3250 §4, byte 2, bits 3-5. The table prints bit 3 first
+            // (bit 0 of a channel-status byte is the first transmitted and
+            // the LSB), so `0b100` here means bit 3 set. `0x04` (byte bit 2)
+            // selects the 24-bit coding range.
+            // (bit3, bit4, bit5, word length with max 24, with max 20)
+            let rows = [
+                (0u8, 0u8, 0u8, None, None),
+                (0, 0, 1, Some(23u32), Some(19u32)),
+                (0, 1, 0, Some(22), Some(18)),
+                (0, 1, 1, Some(21), Some(17)),
+                (1, 0, 0, Some(20), Some(16)),
+                (1, 0, 1, Some(24), Some(20)),
+            ];
+            for (b3, b4, b5, with_24, with_20) in rows {
+                for (range_24, expected) in [(true, with_24), (false, with_20)] {
+                    let mut status = professional_status(&[(2, b3 << 3 | b4 << 4 | b5 << 5)]);
+                    if range_24 {
+                        status[2] |= 0x04;
+                    }
+                    // Bits 3-5 = 000 is "not indicated"; the receiver
+                    // defaults to the maximum of the coding range.
+                    let expected = expected.unwrap_or(if range_24 { 24 } else { 20 });
+                    assert_eq!(
+                        parse_channel_status(&with_crc(status)).word_bits,
+                        Some(expected),
+                        "byte 2 bits 3-5 = ({b3},{b4},{b5}), 24-bit range = {range_24}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn byte2_reserved_aux_states_do_not_select_the_24bit_range() {
+            // Tech 3250 §4, byte 2, bits 0-2: only `0 0 1` (byte bit 2)
+            // selects the 24-bit range. The other states are the 20-bit
+            // default or reserved; reserved states fall back to the default.
+            for low in [0b001u8, 0b011, 0b101, 0b111] {
+                let status = professional_status(&[(2, low | (0b101 << 3))]);
+                assert_eq!(
+                    parse_channel_status(&with_crc(status)).word_bits,
+                    Some(20),
+                    "byte 2 bits 0-2 = {low:03b} are reserved"
+                );
+            }
+        }
+
+        #[test]
+        fn byte2_reserved_word_length_codes_are_not_decoded() {
+            // Tech 3250 §4, byte 2, bits 3-5: `1 1 0` and `1 1 1` are
+            // reserved.
+            for (b3, b4, b5) in [(1u8, 1u8, 0u8), (1, 1, 1)] {
+                let status = professional_status(&[(2, 0x04 | b3 << 3 | b4 << 4 | b5 << 5)]);
+                assert_eq!(
+                    parse_channel_status(&with_crc(status)).word_bits,
+                    None,
+                    "byte 2 bits 3-5 = ({b3},{b4},{b5}) are reserved"
+                );
+            }
+        }
+
+        #[test]
+        fn byte0_emphasis_table() {
+            // Tech 3250 §4, byte 0, bits 2-4. `1 0 0` is "no emphasis" and
+            // must be distinguishable from `0 0 0`, "not indicated".
+            for (b2, b3, b4, expected) in [
+                (0u8, 0u8, 0u8, None),
+                (1, 0, 0, Some("no emphasis")),
+                (1, 1, 0, Some("50/15")),
+                (1, 1, 1, Some("J.17")),
+            ] {
+                let mut status = professional_status(&[]);
+                status[0] |= b2 << 2 | b3 << 3 | b4 << 4;
+                let summary = parse_channel_status(&with_crc(status)).summary();
+                match expected {
+                    Some(fragment) => assert!(
+                        summary.contains(fragment),
+                        "byte 0 bits 2-4 = ({b2},{b3},{b4}): {summary}"
+                    ),
+                    None => assert!(
+                        !summary.contains("emphasis"),
+                        "byte 0 bits 2-4 = 000: {summary}"
+                    ),
+                }
+            }
+        }
+
+        #[test]
+        fn byte0_professional_sample_rate_table() {
+            // Tech 3250 §4, byte 0, bits 6-7.
+            for (b6, b7, expected) in [
+                (0u8, 0u8, None),
+                (0, 1, Some(48_000u32)),
+                (1, 0, Some(44_100)),
+                (1, 1, Some(32_000)),
+            ] {
+                let mut status = professional_status(&[]);
+                status[0] |= b6 << 6 | b7 << 7;
+                assert_eq!(
+                    parse_channel_status(&with_crc(status)).sample_rate,
+                    expected,
+                    "byte 0 bits 6-7 = ({b6},{b7})"
+                );
+            }
+        }
+
+        #[test]
+        fn byte4_professional_sample_rate_table() {
+            // Tech 3250 §4, byte 4, bits 3-6, with byte 0 bits 6-7 = 00.
+            // (bit3, bit4, bit5, bit6, expected)
+            for (b3, b4, b5, b6, expected) in [
+                (0u8, 0u8, 0u8, 0u8, None),
+                (1, 0, 0, 0, Some(24_000u32)),
+                (0, 1, 0, 0, Some(96_000)),
+                (1, 1, 0, 0, Some(192_000)),
+                (1, 0, 0, 1, Some(22_050)),
+                (0, 1, 0, 1, Some(88_200)),
+                (1, 1, 0, 1, Some(176_400)),
+                (1, 1, 1, 1, None), // user defined
+            ] {
+                let status =
+                    professional_status(&[(2, 0x2C), (4, b3 << 3 | b4 << 4 | b5 << 5 | b6 << 6)]);
+                assert_eq!(
+                    parse_channel_status(&with_crc(status)).sample_rate,
+                    expected,
+                    "byte 4 bits 3-6 = ({b3},{b4},{b5},{b6})"
+                );
+            }
+        }
+
+        #[test]
+        fn byte4_scaling_flag_is_reported() {
+            // Tech 3250 §4, byte 4 bit 7: the indicated rate is divided by
+            // 1.001.
+            let status = professional_status(&[
+                (0, 0x01 | (0b10 << 6)), // 48 kHz in byte 0
+                (2, 0x2C),
+                (4, 0x80),
+            ]);
+            let summary = parse_channel_status(&with_crc(status)).summary();
+            assert!(summary.contains("48 kHz \u{00f7}1.001"), "{summary}");
+        }
+
+        #[test]
+        fn spec_preamble_patterns() {
+            // Tech 3250 §2.4: X = 11100010, Y = 11100100, Z = 11101000,
+            // with the complement used when the preceding state is 1. The
+            // literal patterns are used here, not the `PREAMBLES` constant.
+            for (label, pattern) in [
+                ("Preamble M", [1u8, 1, 1, 0, 0, 0, 1, 0]), // X
+                ("Preamble W", [1, 1, 1, 0, 0, 1, 0, 0]),   // Y
+                ("Preamble B", [1, 1, 1, 0, 1, 0, 0, 0]),   // Z
+            ] {
+                for inverted in [false, true] {
+                    let mut half: Vec<u8> = pattern
+                        .iter()
+                        .map(|state| if inverted { 1 - state } else { *state })
+                        .collect();
+                    let mut level = *half.last().expect("preamble is non-empty");
+                    append_bits(&[0u8; 28], &mut level, &mut half);
+
+                    let decoded = decode(&bmc_vcd(&half, 4), params(WordBits::Bits(24)));
+                    assert_eq!(
+                        decoded.rows[4].items[0].value,
+                        DecodedValue::text(label),
+                        "{label}, inverted = {inverted}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn spec_subframe_word_placement() {
+            // Tech 3250 §2.2.1: MSB in slot 27; LSB in slot 4 (24-bit),
+            // slot 8 (20-bit) or slot 12 (16-bit, the unused LSBs zero).
+            for (word_bits, lsb_slot, sample) in [
+                (24u32, 4usize, 0x123456i64),
+                (20, 8, 0xABCDE),
+                (16, 12, 0x1234),
+            ] {
+                let mut bits = [0u8; 28]; // index 0 = slot 4
+                for offset in 0..word_bits {
+                    bits[lsb_slot - 4 + offset as usize] = ((sample >> offset) & 1) as u8;
+                }
+                let ones: u32 = bits[..27].iter().map(|bit| u32::from(*bit)).sum();
+                bits[27] = (ones % 2) as u8;
+
+                let mut level = 0u8;
+                let mut half = Vec::new();
+                encode_subframe(Preamble::X, &bits, &mut level, &mut half);
+
+                let mut decoder_params = params(WordBits::Bits(word_bits));
+                decoder_params.signed = false;
+                let decoded = decode(&bmc_vcd(&half, 2), decoder_params);
+                assert_eq!(
+                    numeric(&decoded.rows[0].items[0].value),
+                    sample,
+                    "{word_bits}-bit word"
+                );
+            }
+        }
+
+        #[test]
+        fn spec_parity_even_over_slots_4_to_31() {
+            // Tech 3250 §2.2.1: slots 4-31 carry an even number of ones.
+            for ones in [0usize, 1, 2, 13, 27] {
+                let mut bits = [0u8; 28];
+                for bit in bits.iter_mut().take(27).take(ones) {
+                    *bit = 1;
+                }
+                let data_ones: u32 = bits[..27].iter().map(|bit| u32::from(*bit)).sum();
+                bits[27] = (data_ones % 2) as u8;
+
+                let mut level = 0u8;
+                let mut half = Vec::new();
+                encode_subframe(Preamble::X, &bits, &mut level, &mut half);
+                let decoded = decode(&bmc_vcd(&half, 2), params(WordBits::Bits(24)));
+                assert!(
+                    decoded.rows[3].items.is_empty(),
+                    "{ones} data ones should have even parity"
+                );
+
+                bits[27] ^= 1;
+                let mut level = 0u8;
+                let mut half = Vec::new();
+                encode_subframe(Preamble::X, &bits, &mut level, &mut half);
+                let decoded = decode(&bmc_vcd(&half, 2), params(WordBits::Bits(24)));
+                assert_eq!(
+                    decoded.rows[3].items[0].value,
+                    DecodedValue::text("parity"),
+                    "{ones} data ones with the parity bit flipped"
+                );
+            }
+        }
+
+        #[test]
+        fn spec_minimum_implementation_reports_crc_error() {
+            // Tech 3250 §5.2.1: a minimum implementation sends byte 0 =
+            // 0x01 and leaves byte 23 at the default 0. A receiver
+            // implementing the CRCC must report that as a CRC error.
+            let status = professional_status(&[]);
+            let parsed = parse_channel_status(&status);
+            assert_eq!(parsed.crc_ok, Some(false));
+            assert!(
+                parsed.summary().contains("CRC error"),
+                "{}",
+                parsed.summary()
+            );
+        }
     }
 }
